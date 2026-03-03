@@ -1,0 +1,33 @@
+name: Deploy to Wasmer Edge
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Wasmer CLI
+        run: curl https://get.wasmer.io -sSfL | sh
+
+      - name: Login to Wasmer
+        run: ~/.wasmer/bin/wasmer login ${{ secrets.WASMER_TOKEN }}
+
+      - name: Set app secrets
+        run: |
+          ~/.wasmer/bin/wasmer app secrets set \
+            --app=janandreiiii/onemawd-version2 \
+            DB_HOST="${{ secrets.DB_HOST }}" \
+            DB_PORT="${{ secrets.DB_PORT }}" \
+            DB_NAME="${{ secrets.DB_NAME }}" \
+            DB_USER="${{ secrets.DB_USER }}" \
+            DB_PASS="${{ secrets.DB_PASS }}" \
+            DB_SSL="true"
+
+      - name: Deploy to Wasmer Edge
+        run: ~/.wasmer/bin/wasmer deploy --non-interactive --bump

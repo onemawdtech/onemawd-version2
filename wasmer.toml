@@ -1,0 +1,18 @@
+[package]
+name = "janandreiiii/onemawd"
+version = "2.0.0"
+description = "OneMAWD Classroom Management System"
+
+[dependencies]
+"php/php" = "8.3.x"
+
+[fs]
+"/app" = "."
+
+[[command]]
+name = "run"
+module = "php/php:php"
+runner = "wasi"
+
+[command.annotations.wasi]
+main-args = ["-t", "/app", "-S", "localhost:8080"]
