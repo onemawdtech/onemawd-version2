@@ -1,0 +1,51 @@
+Options -Indexes
+ServerSignature Off
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Block direct access to config directory
+    RewriteRule ^config/ - [F,L]
+
+    # Block direct access to includes directory
+    RewriteRule ^includes/ - [F,L]
+
+    # Block direct access to database directory
+    RewriteRule ^database/ - [F,L]
+</IfModule>
+
+# Block sensitive file types from being served
+<FilesMatch "\.(sql|log|env|bak|old|swp|dist|ini|sh|git)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order deny,allow
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# Block dotfiles (e.g. .env, .gitignore, .git)
+<FilesMatch "^\.">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+</FilesMatch>
+
+# Security headers
+<IfModule mod_headers.c>
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-Frame-Options "SAMEORIGIN"
+    Header set X-XSS-Protection "1; mode=block"
+    Header set Referrer-Policy "strict-origin-when-cross-origin"
+    Header set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    Header unset X-Powered-By
+    Header unset Server
+</IfModule>
+
+# Protect config directory (fallback)
+<FilesMatch "^(database|app)\.php$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+</FilesMatch>
