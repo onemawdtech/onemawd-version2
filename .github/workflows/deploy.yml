@@ -18,16 +18,17 @@ jobs:
       - name: Login to Wasmer
         run: ~/.wasmer/bin/wasmer login ${{ secrets.WASMER_TOKEN }}
 
-      - name: Set app secrets
+      - name: Create .env for deployment
         run: |
-          ~/.wasmer/bin/wasmer app secrets set \
-            --app=janandreiiii/onemawd-version2 \
-            DB_HOST="${{ secrets.DB_HOST }}" \
-            DB_PORT="${{ secrets.DB_PORT }}" \
-            DB_NAME="${{ secrets.DB_NAME }}" \
-            DB_USER="${{ secrets.DB_USER }}" \
-            DB_PASS="${{ secrets.DB_PASS }}" \
-            DB_SSL="true"
+          cat > .env <<'ENDOFENV'
+          DB_HOST=${{ secrets.DB_HOST }}
+          DB_PORT=${{ secrets.DB_PORT }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASS=${{ secrets.DB_PASS }}
+          DB_SSL=true
+          ENDOFENV
+          sed -i 's/^[[:space:]]*//' .env
 
       - name: Deploy to Wasmer Edge
-        run: ~/.wasmer/bin/wasmer deploy --non-interactive --bump
+        run: ~/.wasmer/bin/wasmer deploy --non-interactive

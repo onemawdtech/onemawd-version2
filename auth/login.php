@@ -26,6 +26,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['user_role'] = $user['role'];
             $_SESSION['user_section'] = $user['section'];
+
+            // Remember Me — set 30-day persistent token
+            if (!empty($_POST['remember_me'])) {
+                createRememberToken($user['id']);
+            }
+
             redirect('/dashboard.php');
         } else {
             $error = 'Invalid username or password.';
@@ -117,6 +123,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <i class="fas text-xs" :class="show ? 'fa-eye-slash' : 'fa-eye'"></i>
                         </button>
                     </div>
+                </div>
+                <div class="flex items-center justify-between">
+                    <label class="flex items-center gap-2 cursor-pointer select-none">
+                        <input type="checkbox" name="remember_me" value="1"
+                               class="w-4 h-4 rounded border-mono-300 dark:border-mono-600 text-mono-900 dark:text-mono-100 focus:ring-mono-500 accent-mono-900 dark:accent-mono-200">
+                        <span class="text-xs text-mono-500 dark:text-mono-400">Remember me for 30 days</span>
+                    </label>
                 </div>
                 <button type="submit" 
                         class="w-full py-2.5 rounded-lg bg-mono-900 dark:bg-mono-100 text-white dark:text-mono-900 text-sm font-semibold hover:bg-mono-800 dark:hover:bg-mono-200 transition-colors">

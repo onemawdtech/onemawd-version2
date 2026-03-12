@@ -67,17 +67,35 @@ $overallAttendance = $pdo->prepare("
 $overallAttendance->execute([$id]);
 $overall = $overallAttendance->fetch();
 
-// Fund obligations & payments
+// Fund obligations & payments — includes both fund_assignees AND subject-linked funds
+// For recurring funds, total owed = amount × number of billing periods
 $funds = $pdo->prepare("
     SELECT f.*, 
-           COALESCE((SELECT SUM(fp.amount_paid) FROM fund_payments fp WHERE fp.fund_id = f.id AND fp.student_id = ?), 0) as total_paid
+           COALESCE((SELECT SUM(fp.amount_paid) FROM fund_payments fp WHERE fp.fund_id = f.id AND fp.student_id = ?), 0) as total_paid,
+           (SELECT COUNT(*) FROM fund_billing_periods bp WHERE bp.fund_id = f.id) as period_count
     FROM funds f
-    JOIN fund_assignees fa ON f.id = fa.fund_id
-    WHERE fa.student_id = ?
+    WHERE f.status = 'active'
+      AND (
+        f.id IN (SELECT fa.fund_id FROM fund_assignees fa WHERE fa.student_id = ?)
+        OR (f.subject_id IS NOT NULL AND f.subject_id IN (SELECT se.subject_id FROM subject_enrollments se WHERE se.student_id = ?))
+      )
     ORDER BY f.created_at DESC
 ");
-$funds->execute([$id, $id]);
+$funds->execute([$id, $id, $id]);
 $studentFunds = $funds->fetchAll();
+
+// Calculate total_owed per fund (accounts for recurring billing periods)
+foreach ($studentFunds as &$sf) {
+    if ($sf['fund_type'] !== 'standard') {
+        $sf['total_owed'] = 0;
+    } elseif ($sf['frequency'] === 'one-time') {
+        $sf['total_owed'] = (float)$sf['amount'];
+    } else {
+        // Recurring: amount × number of billing periods generated
+        $sf['total_owed'] = (float)$sf['amount'] * max(1, (int)$sf['period_count']);
+    }
+}
+unset($sf);
 
 // Payment history
 $payments = $pdo->prepare("
@@ -91,10 +109,14 @@ $payments = $pdo->prepare("
 $payments->execute([$id]);
 $paymentHistory = $payments->fetchAll();
 
-// Totals
-$totalOwed = array_sum(array_column($studentFunds, 'amount'));
-$totalPaid = array_sum(array_column($studentFunds, 'total_paid'));
-$totalBalance = $totalOwed - $totalPaid;
+// Totals — use computed total_owed (period-aware for recurring funds)
+$totalOwed = 0;
+$totalPaid = 0;
+foreach ($studentFunds as $sf) {
+    $totalOwed += $sf['total_owed'];
+    $totalPaid += $sf['total_paid'];
+}
+$totalBalance = max(0, $totalOwed - $totalPaid);
 
 include dirname(__DIR__) . '/includes/header.php';
 include dirname(__DIR__) . '/includes/sidebar.php';
@@ -212,23 +234,49 @@ include dirname(__DIR__) . '/includes/topbar.php';
             </div>
             <?php else: ?>
             <?php foreach ($studentFunds as $fund): 
-                $balance = $fund['amount'] - $fund['total_paid'];
-                $pct = $fund['amount'] > 0 ? min(100, ($fund['total_paid'] / $fund['amount']) * 100) : 0;
+                $isVoluntary = $fund['fund_type'] === 'voluntary' || $fund['fund_type'] === 'general';
+                $owed = (float)$fund['total_owed'];
+                $paid = (float)$fund['total_paid'];
+                $balance = $isVoluntary ? 0 : max(0, $owed - $paid);
+                $pct = (!$isVoluntary && $owed > 0) ? min(100, ($paid / $owed) * 100) : ($paid > 0 ? 100 : 0);
+                $isRecurring = $fund['frequency'] !== 'one-time';
+                $periodCount = (int)($fund['period_count'] ?? 0);
             ?>
             <div class="px-5 py-4">
                 <div class="flex items-center justify-between mb-1">
-                    <p class="text-sm font-medium"><?= sanitize($fund['fund_name']) ?></p>
-                    <span class="text-xs font-medium <?= $balance > 0 ? 'text-red-500' : 'text-emerald-500' ?>">
-                        <?= $balance > 0 ? formatMoney($balance) . ' due' : 'Paid ✓' ?>
+                    <div class="flex items-center gap-2 min-w-0">
+                        <p class="text-sm font-medium truncate"><?= sanitize($fund['fund_name']) ?></p>
+                        <?php if ($isVoluntary): ?>
+                        <span class="px-1.5 py-0.5 text-[9px] font-medium rounded <?= $fund['fund_type'] === 'voluntary' ? 'bg-blue-100 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400' : 'bg-emerald-100 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400' ?> uppercase tracking-wider flex-shrink-0"><?= $fund['fund_type'] ?></span>
+                        <?php elseif ($isRecurring): ?>
+                        <span class="px-1.5 py-0.5 text-[9px] font-medium rounded bg-amber-100 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 uppercase tracking-wider flex-shrink-0"><?= $fund['frequency'] ?></span>
+                        <?php endif; ?>
+                    </div>
+                    <span class="text-xs font-medium flex-shrink-0 <?= $balance > 0 ? 'text-red-500' : 'text-emerald-500' ?>">
+                        <?php if ($isVoluntary): ?>
+                            <?= $paid > 0 ? formatMoney($paid) . ' paid' : 'No payments' ?>
+                        <?php else: ?>
+                            <?= $balance > 0 ? formatMoney($balance) . ' due' : 'Paid ✓' ?>
+                        <?php endif; ?>
                     </span>
                 </div>
                 <div class="flex items-center justify-between text-[11px] text-mono-400 mb-2">
+                    <?php if ($isVoluntary): ?>
+                    <span><?= ucfirst($fund['frequency']) ?> · Voluntary</span>
+                    <span><?= formatMoney($paid) ?> contributed</span>
+                    <?php elseif ($isRecurring && $periodCount > 0): ?>
+                    <span><?= formatMoney($fund['amount']) ?>/<?= rtrim($fund['frequency'], 'ly') ?> · <?= $periodCount ?> period<?= $periodCount !== 1 ? 's' : '' ?></span>
+                    <span><?= formatMoney($paid) ?> of <?= formatMoney($owed) ?> paid</span>
+                    <?php else: ?>
                     <span><?= ucfirst($fund['frequency']) ?> · <?= formatMoney($fund['amount']) ?></span>
-                    <span><?= formatMoney($fund['total_paid']) ?> paid</span>
+                    <span><?= formatMoney($paid) ?> of <?= formatMoney($owed) ?> paid</span>
+                    <?php endif; ?>
                 </div>
+                <?php if (!$isVoluntary): ?>
                 <div class="w-full h-1.5 bg-mono-100 dark:bg-mono-800 rounded-full overflow-hidden">
                     <div class="h-full rounded-full transition-all duration-500 <?= $pct >= 100 ? 'bg-emerald-500' : 'bg-mono-900 dark:bg-mono-100' ?>" style="width: <?= $pct ?>%"></div>
                 </div>
+                <?php endif; ?>
             </div>
             <?php endforeach; ?>
             <?php endif; ?>

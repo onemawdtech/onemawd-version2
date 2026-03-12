@@ -139,6 +139,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pdo->prepare("UPDATE fund_billing_periods SET status = 'closed' WHERE id = ? AND fund_id = ?")->execute([$periodId, $id]);
         setFlash('success', 'Billing period closed.');
         redirect('/funds/manage.php?id=' . $id);
+    } elseif ($action === 'delete_period') {
+        $periodId = (int)($_POST['period_id'] ?? 0);
+        // Delete all payments linked to this period first
+        $pdo->prepare("DELETE FROM fund_payments WHERE fund_id = ? AND billing_period_id = ?")->execute([$id, $periodId]);
+        $pdo->prepare("DELETE FROM fund_billing_periods WHERE id = ? AND fund_id = ?")->execute([$periodId, $id]);
+        setFlash('success', 'Billing period and its payments deleted.');
+        redirect('/funds/manage.php?id=' . $id);
     } elseif ($action === 'close') {
         $pdo->prepare("UPDATE funds SET status = 'closed' WHERE id = ?")->execute([$id]);
         setFlash('success', 'Fund closed.');
@@ -477,12 +484,31 @@ include dirname(__DIR__) . '/includes/topbar.php';
             <?php endif; ?>
         </div>
         <?php if ($activeBP['status'] === 'active' && $fund['status'] === 'active'): ?>
+        <div class="flex items-center gap-3">
+            <form method="POST" class="inline">
+                <?= csrfField() ?>
+                <input type="hidden" name="action" value="close_period">
+                <input type="hidden" name="period_id" value="<?= $activeBP['id'] ?>">
+                <button type="submit" class="text-[10px] font-medium text-mono-400 hover:text-mono-600 dark:hover:text-mono-300 transition-colors" onclick="return confirm('Close this billing period?')">
+                    <i class="fas fa-lock text-[9px] mr-0.5"></i> Close Period
+                </button>
+            </form>
+            <form method="POST" class="inline">
+                <?= csrfField() ?>
+                <input type="hidden" name="action" value="delete_period">
+                <input type="hidden" name="period_id" value="<?= $activeBP['id'] ?>">
+                <button type="submit" class="text-[10px] font-medium text-red-400 hover:text-red-600 dark:hover:text-red-300 transition-colors" onclick="return confirm('Delete this billing period and all its payments? This cannot be undone.')">
+                    <i class="fas fa-trash text-[9px] mr-0.5"></i> Delete Period
+                </button>
+            </form>
+        </div>
+        <?php elseif ($activeBP['status'] === 'closed'): ?>
         <form method="POST" class="inline">
             <?= csrfField() ?>
-            <input type="hidden" name="action" value="close_period">
+            <input type="hidden" name="action" value="delete_period">
             <input type="hidden" name="period_id" value="<?= $activeBP['id'] ?>">
-            <button type="submit" class="text-[10px] font-medium text-mono-400 hover:text-mono-600 dark:hover:text-mono-300 transition-colors" onclick="return confirm('Close this billing period?')">
-                Close Period
+            <button type="submit" class="text-[10px] font-medium text-red-400 hover:text-red-600 dark:hover:text-red-300 transition-colors" onclick="return confirm('Delete this closed period and all its payments? This cannot be undone.')">
+                <i class="fas fa-trash text-[9px] mr-0.5"></i> Delete Period
             </button>
         </form>
         <?php endif; ?>

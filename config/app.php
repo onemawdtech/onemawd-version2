@@ -9,10 +9,12 @@ date_default_timezone_set('Asia/Manila');
 define('OMAWD_ACCESS', true);
 
 // ── Session security hardening ────────────────────────────
+ini_set('session.gc_maxlifetime', 28800);   // 8 hours — prevents premature garbage collection
+ini_set('session.cookie_lifetime', 28800);  // 8-hour session cookie
 ini_set('session.use_strict_mode', 1);
 ini_set('session.use_only_cookies', 1);
 ini_set('session.cookie_httponly', 1);
-ini_set('session.cookie_samesite', 'Strict');
+ini_set('session.cookie_samesite', 'Lax');  // Lax allows normal navigation; Strict can break redirects
 if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
     ini_set('session.cookie_secure', 1);
 }
@@ -100,6 +102,47 @@ define('APP_VERSION', '2.0');
 
 // Include database
 require_once BASE_PATH . '/config/database.php';
+
+// ── Remember Me: auto-restore session from token cookie ───
+if (!isset($_SESSION['user_id']) && !empty($_COOKIE['remember_token'])) {
+    $token = $_COOKIE['remember_token'];
+    $tokenHash = hash('sha256', $token);
+    $stmt = $pdo->prepare("
+        SELECT at.user_id, a.role, a.section
+        FROM auth_tokens at
+        JOIN accounts a ON a.id = at.user_id
+        WHERE at.token_hash = ? AND at.expires_at > NOW()
+    ");
+    $stmt->execute([$tokenHash]);
+    $tokenRow = $stmt->fetch();
+    if ($tokenRow) {
+        session_regenerate_id(true);
+        $_SESSION['user_id'] = $tokenRow['user_id'];
+        $_SESSION['user_role'] = $tokenRow['role'];
+        $_SESSION['user_section'] = $tokenRow['section'];
+        $_SESSION['_fingerprint'] = $_fingerprint;
+        // Rotate token for security
+        $newToken = bin2hex(random_bytes(32));
+        $newHash = hash('sha256', $newToken);
+        $pdo->prepare("UPDATE auth_tokens SET token_hash = ?, expires_at = DATE_ADD(NOW(), INTERVAL 30 DAY) WHERE token_hash = ?")
+            ->execute([$newHash, $tokenHash]);
+        $secure = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on';
+        setcookie('remember_token', $newToken, [
+            'expires'  => time() + (30 * 24 * 3600),
+            'path'     => '/',
+            'httponly'  => true,
+            'secure'   => $secure,
+            'samesite' => 'Lax',
+        ]);
+    } else {
+        // Token invalid or expired — clear cookie
+        setcookie('remember_token', '', ['expires' => 1, 'path' => '/']);
+    }
+    // Clean up expired tokens periodically (1% chance)
+    if (random_int(1, 100) === 1) {
+        $pdo->exec("DELETE FROM auth_tokens WHERE expires_at < NOW()");
+    }
+}
 
 // Helper functions
 function redirect($path) {
@@ -209,4 +252,32 @@ function generateUuid() {
         random_int(0, 0x3fff) | 0x8000,
         random_int(0, 0xffff), random_int(0, 0xffff), random_int(0, 0xffff)
     );
+}
+
+// ── Remember Me helpers ───────────────────────────────────
+function createRememberToken(int $userId): void {
+    global $pdo;
+    $token = bin2hex(random_bytes(32));
+    $hash  = hash('sha256', $token);
+    // Remove any existing tokens for this user (one device at a time, or allow multiple — keeping it simple)
+    $pdo->prepare("DELETE FROM auth_tokens WHERE user_id = ?")->execute([$userId]);
+    $pdo->prepare("INSERT INTO auth_tokens (user_id, token_hash, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY))")
+        ->execute([$userId, $hash]);
+    $secure = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on';
+    setcookie('remember_token', $token, [
+        'expires'  => time() + (30 * 24 * 3600),
+        'path'     => '/',
+        'httponly'  => true,
+        'secure'   => $secure,
+        'samesite' => 'Lax',
+    ]);
+}
+
+function clearRememberToken(): void {
+    global $pdo;
+    if (!empty($_COOKIE['remember_token'])) {
+        $hash = hash('sha256', $_COOKIE['remember_token']);
+        $pdo->prepare("DELETE FROM auth_tokens WHERE token_hash = ?")->execute([$hash]);
+    }
+    setcookie('remember_token', '', ['expires' => 1, 'path' => '/']);
 }
