@@ -105,10 +105,14 @@ CREATE TABLE attendance_sessions (
     subject_id INT NOT NULL,
     session_date DATE NOT NULL,
     notes TEXT DEFAULT NULL,
+    is_locked TINYINT(1) NOT NULL DEFAULT 0,
+    locked_by INT DEFAULT NULL,
+    locked_at DATETIME DEFAULT NULL,
     created_by INT DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
-    FOREIGN KEY (created_by) REFERENCES accounts(id) ON DELETE SET NULL
+    FOREIGN KEY (created_by) REFERENCES accounts(id) ON DELETE SET NULL,
+    FOREIGN KEY (locked_by) REFERENCES accounts(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE attendance_records (
@@ -136,11 +140,16 @@ CREATE TABLE funds (
     due_date DATE DEFAULT NULL,
     subject_id INT DEFAULT NULL,
     status ENUM('active', 'closed') DEFAULT 'active',
+    is_locked TINYINT(1) NOT NULL DEFAULT 0,
+    locked_by INT DEFAULT NULL,
+    locked_at DATETIME DEFAULT NULL,
+    auto_lock_days INT NOT NULL DEFAULT 0,
     created_by INT DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE SET NULL,
-    FOREIGN KEY (created_by) REFERENCES accounts(id) ON DELETE SET NULL
+    FOREIGN KEY (created_by) REFERENCES accounts(id) ON DELETE SET NULL,
+    FOREIGN KEY (locked_by) REFERENCES accounts(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE fund_assignees (
@@ -181,6 +190,19 @@ CREATE TABLE fund_billing_periods (
     status ENUM('active', 'closed') DEFAULT 'active',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (fund_id) REFERENCES funds(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE fund_withdrawals (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    fund_id INT NOT NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    withdrawal_date DATE NOT NULL,
+    purpose VARCHAR(255) NOT NULL,
+    notes TEXT DEFAULT NULL,
+    recorded_by INT DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (fund_id) REFERENCES funds(id) ON DELETE CASCADE,
+    FOREIGN KEY (recorded_by) REFERENCES accounts(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ========================================

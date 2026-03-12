@@ -63,11 +63,18 @@ include dirname(__DIR__) . '/includes/topbar.php';
         <a href="?status=active" class="px-3 py-1.5 text-xs font-medium rounded-lg transition-colors <?= $statusFilter === 'active' ? 'bg-mono-900 dark:bg-mono-100 text-white dark:text-mono-900' : 'bg-mono-100 dark:bg-mono-800 text-mono-500 hover:bg-mono-200 dark:hover:bg-mono-700' ?>">Active</a>
         <a href="?status=closed" class="px-3 py-1.5 text-xs font-medium rounded-lg transition-colors <?= $statusFilter === 'closed' ? 'bg-mono-900 dark:bg-mono-100 text-white dark:text-mono-900' : 'bg-mono-100 dark:bg-mono-800 text-mono-500 hover:bg-mono-200 dark:hover:bg-mono-700' ?>">Closed</a>
     </div>
-    <a href="<?= BASE_URL ?>/funds/create.php" 
-       class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-mono-900 dark:bg-mono-100 text-white dark:text-mono-900 text-sm font-medium hover:bg-mono-800 dark:hover:bg-mono-200 transition-colors">
-        <i class="fas fa-plus text-xs"></i>
-        <span>New Fund</span>
-    </a>
+    <div class="flex gap-2">
+        <a href="<?= BASE_URL ?>/funds/audit.php" 
+           class="inline-flex items-center gap-2 px-4 py-2 rounded-lg border-2 border-red-500 text-red-600 dark:text-red-400 text-sm font-semibold hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
+            <i class="fas fa-file-pdf text-xs"></i>
+            <span>Audit Report</span>
+        </a>
+        <a href="<?= BASE_URL ?>/funds/create.php" 
+           class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-mono-900 dark:bg-mono-100 text-white dark:text-mono-900 text-sm font-medium hover:bg-mono-800 dark:hover:bg-mono-200 transition-colors">
+            <i class="fas fa-plus text-xs"></i>
+            <span>New Fund</span>
+        </a>
+    </div>
 </div>
 
 <!-- Funds Grid -->

@@ -40,12 +40,13 @@ if (isTeacher()) {
 }
 
 $pageSubtitle = $session['subject_code'] . ' - ' . formatDate($session['session_date']);
+$isLocked = (bool)($session['is_locked'] ?? 0);
 
 // Handle updates
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
     
-    if ($action === 'update') {
+    if ($action === 'update' && !$isLocked) {
         $statuses = $_POST['status'] ?? [];
         foreach ($statuses as $studentId => $status) {
             $stmt = $pdo->prepare("UPDATE attendance_records SET status = ? WHERE session_id = ? AND student_id = ?");
@@ -53,10 +54,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         setFlash('success', 'Attendance updated.');
         redirect('/attendance/session.php?id=' . $id);
-    } elseif ($action === 'delete') {
+    } elseif ($action === 'delete' && !$isLocked) {
         $pdo->prepare("DELETE FROM attendance_sessions WHERE id = ?")->execute([$id]);
         setFlash('success', 'Session deleted.');
         redirect('/attendance/');
+    } elseif ($action === 'lock') {
+        $pdo->prepare("UPDATE attendance_sessions SET is_locked = 1 WHERE id = ?")->execute([$id]);
+        setFlash('success', 'Attendance session locked.');
+        redirect('/attendance/session.php?id=' . $id);
+    } elseif ($action === 'unlock') {
+        $pdo->prepare("UPDATE attendance_sessions SET is_locked = 0 WHERE id = ?")->execute([$id]);
+        setFlash('success', 'Attendance session unlocked.');
+        redirect('/attendance/session.php?id=' . $id);
     }
 }
 
@@ -88,6 +97,7 @@ include dirname(__DIR__) . '/includes/topbar.php';
      x-data="{
         search: '',
         editing: false,
+        isLocked: <?= $isLocked ? 'true' : 'false' ?>,
         counts: { present: <?= $present ?>, late: <?= $late ?>, absent: <?= $absent ?>, excused: <?= $excused ?> },
         total: <?= $total ?>,
         updateCounts() {
@@ -121,10 +131,29 @@ include dirname(__DIR__) . '/includes/topbar.php';
                 </div>
             </div>
             <div class="flex items-center gap-2 flex-shrink-0">
+                <?php if ($isLocked): ?>
+                <span class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-amber-100 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 rounded-lg">
+                    <i class="fas fa-lock text-[10px]"></i> Locked
+                </span>
+                <form method="POST" class="inline">
+                    <?= csrfField() ?>
+                    <input type="hidden" name="action" value="unlock">
+                    <button type="submit" class="px-3 py-1.5 text-xs font-medium border border-mono-200 dark:border-mono-700 rounded-lg hover:bg-mono-50 dark:hover:bg-mono-800 transition-colors">
+                        <i class="fas fa-unlock mr-1"></i> Unlock
+                    </button>
+                </form>
+                <?php else: ?>
                 <button @click="editing = !editing" type="button"
                         class="px-3 py-1.5 text-xs font-medium border border-mono-200 dark:border-mono-700 rounded-lg hover:bg-mono-50 dark:hover:bg-mono-800 transition-colors"
                         x-text="editing ? 'Cancel Edit' : 'Edit Attendance'">
                 </button>
+                <form method="POST" class="inline">
+                    <?= csrfField() ?>
+                    <input type="hidden" name="action" value="lock">
+                    <button type="submit" class="px-3 py-1.5 text-xs font-medium text-amber-500 border border-amber-200 dark:border-amber-800 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors" onclick="return confirm('Lock this session? This will prevent any edits until unlocked.')">
+                        <i class="fas fa-lock mr-1"></i> Lock
+                    </button>
+                </form>
                 <form method="POST" onsubmit="return confirm('Delete this session?')" class="inline">
                     <?= csrfField() ?>
                     <input type="hidden" name="action" value="delete">
@@ -132,6 +161,7 @@ include dirname(__DIR__) . '/includes/topbar.php';
                         <i class="fas fa-trash mr-1"></i> Delete
                     </button>
                 </form>
+                <?php endif; ?>
             </div>
         </div>
 

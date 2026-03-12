@@ -56,6 +56,12 @@ $isRecurring = $fund['frequency'] !== 'one-time';
 $fundType = $fund['fund_type'] ?? 'standard';
 $isGeneral = $fundType === 'general';
 $isVoluntary = $fundType === 'voluntary';
+$isLocked = (bool)($fund['is_locked'] ?? 0);
+$lockedBy = $fund['locked_by'] ?? null;
+$autoLockDays = (int)($fund['auto_lock_days'] ?? 0);
+
+// Current tab
+$activeTab = $_GET['tab'] ?? 'payments';
 
 // Fetch billing periods for recurring funds
 $billingPeriods = [];
@@ -82,7 +88,26 @@ if ($isRecurring && !empty($billingPeriods)) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
-    if ($action === 'record_payment') {
+    if ($action === 'lock') {
+        $pdo->prepare("UPDATE funds SET is_locked = 1, locked_by = ?, locked_at = NOW() WHERE id = ?")->execute([$_SESSION['user_id'], $id]);
+        setFlash('success', 'Fund records locked.');
+        redirect('/funds/manage.php?id=' . $id . ($activeTab !== 'payments' ? '&tab=' . $activeTab : ''));
+    } elseif ($action === 'unlock') {
+        // Only allow unlock by the user who locked it OR admin
+        $canUnlock = isAdmin() || $lockedBy == $_SESSION['user_id'];
+        if ($canUnlock) {
+            $pdo->prepare("UPDATE funds SET is_locked = 0, locked_by = NULL, locked_at = NULL WHERE id = ?")->execute([$id]);
+            setFlash('success', 'Fund records unlocked.');
+        } else {
+            setFlash('error', 'Only the user who locked this fund can unlock it.');
+        }
+        redirect('/funds/manage.php?id=' . $id . ($activeTab !== 'payments' ? '&tab=' . $activeTab : ''));
+    } elseif ($action === 'set_auto_lock') {
+        $days = (int)($_POST['auto_lock_days'] ?? 0);
+        $pdo->prepare("UPDATE funds SET auto_lock_days = ? WHERE id = ?")->execute([$days, $id]);
+        setFlash('success', $days > 0 ? "Auto-lock set to $days days." : 'Auto-lock disabled.');
+        redirect('/funds/manage.php?id=' . $id . '&tab=settings');
+    } elseif ($action === 'record_payment' && !$isLocked) {
         $studentId = (int)($_POST['student_id'] ?? 0);
         $isDeposit = !empty($_POST['is_deposit']);
         $amountPaid = (float)($_POST['amount_paid'] ?? 0);
@@ -91,13 +116,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $notes = trim($_POST['notes'] ?? '');
         $billingPeriodId = $isRecurring ? (int)($_POST['billing_period_id'] ?? $activePeriodId) : null;
 
+        // Handle receipt upload for GCash/Bank Transfer
+        $receiptImage = null;
+        $receiptMime = null;
+        if (in_array($method, ['gcash', 'bank_transfer']) && !empty($_FILES['receipt_image']['tmp_name'])) {
+            $allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+            $fileMime = mime_content_type($_FILES['receipt_image']['tmp_name']);
+            if (in_array($fileMime, $allowedTypes) && $_FILES['receipt_image']['size'] <= 5 * 1024 * 1024) {
+                $receiptImage = file_get_contents($_FILES['receipt_image']['tmp_name']);
+                $receiptMime = $fileMime;
+            }
+        }
+
         if ($amountPaid > 0 && ($studentId || $isDeposit)) {
-            $stmt = $pdo->prepare("INSERT INTO fund_payments (fund_id, student_id, amount_paid, payment_date, payment_method, notes, recorded_by, billing_period_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-            $stmt->execute([$id, $isDeposit ? null : $studentId, $amountPaid, $paymentDate, $method, $notes ?: null, $_SESSION['user_id'], $billingPeriodId]);
+            $stmt = $pdo->prepare("INSERT INTO fund_payments (fund_id, student_id, amount_paid, payment_date, payment_method, notes, recorded_by, billing_period_id, receipt_image, receipt_mime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->execute([$id, $isDeposit ? null : $studentId, $amountPaid, $paymentDate, $method, $notes ?: null, $_SESSION['user_id'], $billingPeriodId, $receiptImage, $receiptMime]);
             setFlash('success', $isDeposit ? 'Deposit recorded successfully.' : 'Payment recorded successfully.');
         }
         redirect('/funds/manage.php?id=' . $id . ($billingPeriodId ? '&period=' . $billingPeriodId : ''));
-    } elseif ($action === 'generate_next_period') {
+    } elseif ($action === 'generate_next_period' && !$isLocked) {
         if ($isRecurring) {
             $lastPeriod = !empty($billingPeriods) ? end($billingPeriods) : null;
             $periodStart = $lastPeriod ? date('Y-m-d', strtotime($lastPeriod['period_end'] . ' +1 day')) : date('Y-m-d');
@@ -134,12 +171,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             setFlash('success', 'New billing period "' . $periodLabel . '" generated. Students are now charged ' . formatMoney($fund['amount']) . ' each.');
             redirect('/funds/manage.php?id=' . $id . '&period=' . $newPeriodId);
         }
-    } elseif ($action === 'close_period') {
+    } elseif ($action === 'close_period' && !$isLocked) {
         $periodId = (int)($_POST['period_id'] ?? 0);
         $pdo->prepare("UPDATE fund_billing_periods SET status = 'closed' WHERE id = ? AND fund_id = ?")->execute([$periodId, $id]);
         setFlash('success', 'Billing period closed.');
         redirect('/funds/manage.php?id=' . $id);
-    } elseif ($action === 'delete_period') {
+    } elseif ($action === 'delete_period' && !$isLocked) {
         $periodId = (int)($_POST['period_id'] ?? 0);
         // Delete all payments linked to this period first
         $pdo->prepare("DELETE FROM fund_payments WHERE fund_id = ? AND billing_period_id = ?")->execute([$id, $periodId]);
@@ -154,15 +191,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pdo->prepare("UPDATE funds SET status = 'active' WHERE id = ?")->execute([$id]);
         setFlash('success', 'Fund reopened.');
         redirect('/funds/manage.php?id=' . $id);
-    } elseif ($action === 'delete') {
+    } elseif ($action === 'delete' && !$isLocked) {
         $pdo->prepare("DELETE FROM funds WHERE id = ?")->execute([$id]);
         setFlash('success', 'Fund deleted.');
         redirect('/funds/');
-    } elseif ($action === 'delete_payment') {
+    } elseif ($action === 'delete_payment' && !$isLocked) {
         $paymentId = (int)($_POST['payment_id'] ?? 0);
         $pdo->prepare("DELETE FROM fund_payments WHERE id = ? AND fund_id = ?")->execute([$paymentId, $id]);
         setFlash('success', 'Payment removed.');
         redirect('/funds/manage.php?id=' . $id . ($activePeriodId ? '&period=' . $activePeriodId : ''));
+    } elseif ($action === 'record_withdrawal' && !$isLocked) {
+        $amount = (float)($_POST['withdrawal_amount'] ?? 0);
+        $withdrawalDate = $_POST['withdrawal_date'] ?? date('Y-m-d');
+        $purpose = trim($_POST['purpose'] ?? '');
+        $notes = trim($_POST['withdrawal_notes'] ?? '');
+        
+        if ($amount > 0 && $purpose) {
+            $stmt = $pdo->prepare("INSERT INTO fund_withdrawals (fund_id, amount, withdrawal_date, purpose, notes, recorded_by) VALUES (?, ?, ?, ?, ?, ?)");
+            $stmt->execute([$id, $amount, $withdrawalDate, $purpose, $notes ?: null, $_SESSION['user_id']]);
+            setFlash('success', 'Withdrawal of ' . formatMoney($amount) . ' recorded.');
+        }
+        redirect('/funds/manage.php?id=' . $id . '&tab=withdrawals' . ($activePeriodId ? '&period=' . $activePeriodId : ''));
+    } elseif ($action === 'delete_withdrawal' && !$isLocked) {
+        $withdrawalId = (int)($_POST['withdrawal_id'] ?? 0);
+        $pdo->prepare("DELETE FROM fund_withdrawals WHERE id = ? AND fund_id = ?")->execute([$withdrawalId, $id]);
+        setFlash('success', 'Withdrawal removed.');
+        redirect('/funds/manage.php?id=' . $id . '&tab=withdrawals' . ($activePeriodId ? '&period=' . $activePeriodId : ''));
+    } elseif ($action === 'upload_acknowledgment') {
+        $periodIdToUpload = (int)($_POST['period_id'] ?? 0);
+        if ($periodIdToUpload && !empty($_FILES['acknowledgment_form']['tmp_name'])) {
+            $allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf'];
+            $fileMime = mime_content_type($_FILES['acknowledgment_form']['tmp_name']);
+            if (in_array($fileMime, $allowedTypes) && $_FILES['acknowledgment_form']['size'] <= 10 * 1024 * 1024) {
+                $formData = file_get_contents($_FILES['acknowledgment_form']['tmp_name']);
+                $stmt = $pdo->prepare("UPDATE fund_billing_periods SET acknowledgment_form = ?, form_mime = ?, form_uploaded_at = NOW() WHERE id = ? AND fund_id = ?");
+                $stmt->execute([$formData, $fileMime, $periodIdToUpload, $id]);
+                setFlash('success', 'Acknowledgment form uploaded successfully.');
+            } else {
+                setFlash('error', 'Invalid file type or size. Max 10MB, accepts images and PDF.');
+            }
+        }
+        redirect('/funds/manage.php?id=' . $id . '&period=' . $periodIdToUpload);
     }
 }
 
@@ -268,6 +337,15 @@ $allDepositsStmt = $pdo->prepare("SELECT COALESCE(SUM(fp.amount_paid), 0) FROM f
 $allDepositsStmt->execute([$id]);
 $totalDeposits = (float)$allDepositsStmt->fetchColumn();
 
+// Withdrawals
+$withdrawalsStmt = $pdo->prepare("SELECT * FROM fund_withdrawals WHERE fund_id = ? ORDER BY withdrawal_date DESC, created_at DESC");
+$withdrawalsStmt->execute([$id]);
+$withdrawals = $withdrawalsStmt->fetchAll();
+
+$totalWithdrawalsStmt = $pdo->prepare("SELECT COALESCE(SUM(amount), 0) FROM fund_withdrawals WHERE fund_id = ?");
+$totalWithdrawalsStmt->execute([$id]);
+$totalWithdrawals = (float)$totalWithdrawalsStmt->fetchColumn();
+
 // Totals
 if ($isGeneral || $isVoluntary) {
     // General/voluntary: no target, just sum all payments
@@ -298,6 +376,9 @@ if ($isGeneral || $isVoluntary) {
 }
 $overallPct = $totalTarget > 0 ? min(100, ($totalCollected / $totalTarget) * 100) : 0;
 
+// Current balance = total collected - withdrawals
+$currentBalance = $grandCollected - $totalWithdrawals;
+
 // Active billing period info
 $activeBP = null;
 if ($isRecurring && $activePeriodId) {
@@ -325,6 +406,11 @@ include dirname(__DIR__) . '/includes/topbar.php';
                     <span class="px-2 py-0.5 text-[10px] font-medium rounded-full uppercase tracking-wider <?= $fund['status'] === 'active' ? 'bg-emerald-100 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400' : 'bg-mono-100 dark:bg-mono-800 text-mono-500' ?>">
                         <?= $fund['status'] ?>
                     </span>
+                    <?php if ($isLocked): ?>
+                    <span class="px-2 py-0.5 text-[10px] font-medium rounded-full uppercase tracking-wider bg-amber-100 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400">
+                        <i class="fas fa-lock text-[8px] mr-0.5"></i> Locked
+                    </span>
+                    <?php endif; ?>
                 </div>
                 <?php if ($fund['description']): ?>
                 <p class="text-xs text-mono-400 mb-2"><?= sanitize($fund['description']) ?></p>
@@ -343,7 +429,19 @@ include dirname(__DIR__) . '/includes/topbar.php';
                     <?php if ($isRecurring): ?><span><i class="fas fa-layer-group mr-1"></i> <?= $totalPeriodsCount ?> billing period<?= $totalPeriodsCount !== 1 ? 's' : '' ?></span><?php endif; ?>
                 </div>
             </div>
-            <div class="flex gap-2 flex-shrink-0">
+            <div class="flex flex-wrap gap-2 flex-shrink-0">
+                <?php if ($isLocked): ?>
+                <form method="POST"><?= csrfField() ?><input type="hidden" name="action" value="unlock">
+                    <button type="submit" class="px-3 py-1.5 text-xs font-medium border border-mono-200 dark:border-mono-700 rounded-lg hover:bg-mono-50 dark:hover:bg-mono-800 transition-colors">
+                        <i class="fas fa-unlock mr-1"></i> Unlock Records
+                    </button>
+                </form>
+                <?php else: ?>
+                <form method="POST"><?= csrfField() ?><input type="hidden" name="action" value="lock">
+                    <button type="submit" onclick="return confirm('Lock this fund? This will prevent recording payments, deleting, and other changes until unlocked.')" class="px-3 py-1.5 text-xs font-medium text-amber-500 border border-amber-200 dark:border-amber-800 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors">
+                        <i class="fas fa-lock mr-1"></i> Lock Records
+                    </button>
+                </form>
                 <?php if ($fund['status'] === 'active'): ?>
                 <form method="POST"><?= csrfField() ?><input type="hidden" name="action" value="close">
                     <button type="submit" class="px-3 py-1.5 text-xs font-medium border border-mono-200 dark:border-mono-700 rounded-lg hover:bg-mono-50 dark:hover:bg-mono-800 transition-colors">Close Fund</button>
@@ -358,34 +456,43 @@ include dirname(__DIR__) . '/includes/topbar.php';
                         <i class="fas fa-trash mr-1"></i> Delete
                     </button>
                 </form>
+                <?php endif; ?>
             </div>
         </div>
 
         <!-- Progress -->
         <?php if ($isGeneral || $isVoluntary): ?>
-        <div class="grid grid-cols-2 gap-4 mb-4">
+        <div class="grid grid-cols-3 gap-4 mb-4">
             <div class="text-center p-3 rounded-lg bg-mono-50 dark:bg-mono-800">
-                <p class="text-lg font-bold"><?= formatMoney($totalCollected) ?></p>
+                <p class="text-lg font-bold"><?= formatMoney($grandCollected) ?></p>
                 <p class="text-[10px] text-mono-400 uppercase tracking-wider">Total Collected</p>
             </div>
             <div class="text-center p-3 rounded-lg bg-mono-50 dark:bg-mono-800">
-                <p class="text-lg font-bold"><?= count($paymentHistory) ?></p>
-                <p class="text-[10px] text-mono-400 uppercase tracking-wider"><?= $isGeneral ? 'Deposits' : 'Contributions' ?></p>
+                <p class="text-lg font-bold text-red-500"><?= formatMoney($totalWithdrawals) ?></p>
+                <p class="text-[10px] text-mono-400 uppercase tracking-wider">Withdrawn</p>
+            </div>
+            <div class="text-center p-3 rounded-lg <?= $currentBalance >= 0 ? 'bg-emerald-50 dark:bg-emerald-900/20' : 'bg-red-50 dark:bg-red-900/20' ?>">
+                <p class="text-lg font-bold <?= $currentBalance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400' ?>"><?= formatMoney($currentBalance) ?></p>
+                <p class="text-[10px] text-mono-400 uppercase tracking-wider">Current Balance</p>
             </div>
         </div>
         <?php else: ?>
-        <div class="grid grid-cols-3 gap-4 mb-4">
+        <div class="grid grid-cols-4 gap-3 mb-4">
             <div class="text-center p-3 rounded-lg bg-mono-50 dark:bg-mono-800">
                 <p class="text-lg font-bold"><?= formatMoney($totalCollected) ?></p>
-                <p class="text-[10px] text-mono-400 uppercase tracking-wider"><?= $isRecurring && $activeBP ? 'Period Collected' : 'Collected' ?></p>
+                <p class="text-[10px] text-mono-400 uppercase tracking-wider"><?= $isRecurring && $activeBP ? 'Period' : 'Collected' ?></p>
             </div>
             <div class="text-center p-3 rounded-lg bg-mono-50 dark:bg-mono-800">
                 <p class="text-lg font-bold"><?= formatMoney($totalTarget) ?></p>
-                <p class="text-[10px] text-mono-400 uppercase tracking-wider"><?= $isRecurring && $activeBP ? 'Period Target' : 'Target' ?></p>
+                <p class="text-[10px] text-mono-400 uppercase tracking-wider"><?= $isRecurring && $activeBP ? 'Target' : 'Target' ?></p>
             </div>
             <div class="text-center p-3 rounded-lg bg-mono-50 dark:bg-mono-800">
                 <p class="text-lg font-bold"><?= $paidCount ?>/<?= count($fundAssignees) ?></p>
-                <p class="text-[10px] text-mono-400 uppercase tracking-wider">Fully Paid</p>
+                <p class="text-[10px] text-mono-400 uppercase tracking-wider">Paid</p>
+            </div>
+            <div class="text-center p-3 rounded-lg <?= $currentBalance >= 0 ? 'bg-emerald-50 dark:bg-emerald-900/20' : 'bg-red-50 dark:bg-red-900/20' ?>">
+                <p class="text-lg font-bold <?= $currentBalance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400' ?>"><?= formatMoney($currentBalance) ?></p>
+                <p class="text-[10px] text-mono-400 uppercase tracking-wider">Balance</p>
             </div>
         </div>
         <div class="w-full h-2 bg-mono-100 dark:bg-mono-800 rounded-full overflow-hidden">
@@ -513,9 +620,81 @@ include dirname(__DIR__) . '/includes/topbar.php';
         </form>
         <?php endif; ?>
     </div>
+
+    <!-- Period Actions: Generate Form & Upload Acknowledgment -->
+    <div class="flex flex-wrap items-center gap-3 mb-4 p-3 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800" x-data="{ showUpload: false }">
+        <div class="flex-1 flex items-center gap-2">
+            <i class="fas fa-file-signature text-blue-500"></i>
+            <span class="text-xs text-blue-700 dark:text-blue-300">Payment Ledger Form</span>
+        </div>
+        <a href="<?= BASE_URL ?>/funds/generate-form.php?fund_id=<?= $id ?>&period_id=<?= $activeBP['id'] ?>" target="_blank"
+           class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+            <i class="fas fa-file-alt text-[10px]"></i> Generate Form
+        </a>
+        <button type="button" @click="showUpload = !showUpload"
+                class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors">
+            <i class="fas fa-upload text-[10px]"></i> 
+            <?= $activeBP['acknowledgment_form'] ? 'Update' : 'Upload' ?> Signed Form
+        </button>
+        <?php if (!empty($activeBP['acknowledgment_form'])): ?>
+        <a href="<?= BASE_URL ?>/funds/acknowledgment.php?period_id=<?= $activeBP['id'] ?>" target="_blank"
+           class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400 hover:underline">
+            <i class="fas fa-eye text-[10px]"></i> View Uploaded
+            <span class="text-[9px] text-mono-400">(<?= date('M d', strtotime($activeBP['form_uploaded_at'])) ?>)</span>
+        </a>
+        <?php endif; ?>
+        
+        <!-- Upload Form (collapsible) -->
+        <div x-show="showUpload" x-transition x-cloak class="w-full mt-2 pt-2 border-t border-blue-200 dark:border-blue-800">
+            <form method="POST" enctype="multipart/form-data" class="flex items-center gap-2">
+                <?= csrfField() ?>
+                <input type="hidden" name="action" value="upload_acknowledgment">
+                <input type="hidden" name="period_id" value="<?= $activeBP['id'] ?>">
+                <input type="file" name="acknowledgment_form" required accept="image/*,.pdf"
+                       class="flex-1 text-xs file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-blue-100 dark:file:bg-blue-900/30 file:text-blue-700 dark:file:text-blue-300">
+                <button type="submit" class="px-3 py-1.5 text-xs font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors">
+                    <i class="fas fa-check mr-1"></i> Upload
+                </button>
+            </form>
+            <p class="text-[10px] text-blue-500 dark:text-blue-400 mt-1">Upload the signed acknowledgment form (image or PDF, max 10MB)</p>
+        </div>
+    </div>
     <?php endif; ?>
     <?php endif; ?>
 
+    <!-- Tab Navigation -->
+    <div class="flex items-center justify-between gap-1 mb-6 border-b border-mono-200 dark:border-mono-700">
+        <div class="flex items-center gap-1">
+            <a href="<?= BASE_URL ?>/funds/manage.php?id=<?= $id ?>&tab=payments<?= $activePeriodId ? '&period=' . $activePeriodId : '' ?>"
+               class="px-4 py-2.5 text-sm font-medium transition-colors <?= $activeTab === 'payments' ? 'border-b-2 border-mono-900 dark:border-mono-100 text-mono-900 dark:text-mono-100' : 'text-mono-400 hover:text-mono-600 dark:hover:text-mono-300' ?>">
+                <i class="fas fa-coins mr-1.5 text-xs"></i> Payments
+            </a>
+            <a href="<?= BASE_URL ?>/funds/manage.php?id=<?= $id ?>&tab=withdrawals<?= $activePeriodId ? '&period=' . $activePeriodId : '' ?>"
+               class="px-4 py-2.5 text-sm font-medium transition-colors <?= $activeTab === 'withdrawals' ? 'border-b-2 border-mono-900 dark:border-mono-100 text-mono-900 dark:text-mono-100' : 'text-mono-400 hover:text-mono-600 dark:hover:text-mono-300' ?>">
+                <i class="fas fa-money-bill-wave mr-1.5 text-xs"></i> Withdrawals
+                <?php if ($totalWithdrawals > 0): ?>
+                <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 dark:bg-red-900/20 text-red-600 dark:text-red-400"><?= count($withdrawals) ?></span>
+                <?php endif; ?>
+            </a>
+            <a href="<?= BASE_URL ?>/funds/manage.php?id=<?= $id ?>&tab=settings<?= $activePeriodId ? '&period=' . $activePeriodId : '' ?>"
+               class="px-4 py-2.5 text-sm font-medium transition-colors <?= $activeTab === 'settings' ? 'border-b-2 border-mono-900 dark:border-mono-100 text-mono-900 dark:text-mono-100' : 'text-mono-400 hover:text-mono-600 dark:hover:text-mono-300' ?>">
+                <i class="fas fa-cog mr-1.5 text-xs"></i> Settings
+            </a>
+        </div>
+        <div class="flex items-center gap-2">
+            <a href="<?= BASE_URL ?>/funds/generate-form.php?fund_id=<?= $id ?>" target="_blank"
+               class="inline-flex items-center gap-1.5 px-3 py-1.5 mb-1 rounded-lg border border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400 text-xs font-medium hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors">
+                <i class="fas fa-file-signature text-[10px]"></i> Generate Form
+            </a>
+            <a href="<?= BASE_URL ?>/funds/audit.php?fund_id=<?= $id ?>" 
+               class="inline-flex items-center gap-1.5 px-3 py-1.5 mb-1 rounded-lg border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 text-xs font-medium hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
+                <i class="fas fa-file-pdf text-[10px]"></i> Audit Report
+            </a>
+        </div>
+    </div>
+
+    <?php if ($activeTab === 'payments'): ?>
+    <!-- PAYMENTS TAB -->
     <div class="grid lg:grid-cols-5 gap-6">
         <!-- Student Payment Status / Fund Activity -->
         <div class="lg:col-span-3 bg-white dark:bg-mono-900 rounded-xl border border-mono-200 dark:border-mono-800">
@@ -635,7 +814,7 @@ include dirname(__DIR__) . '/includes/topbar.php';
 
         <!-- Record Payment -->
         <div class="lg:col-span-2">
-            <?php if ($fund['status'] === 'active'): ?>
+            <?php if ($fund['status'] === 'active' && !$isLocked): ?>
             <script>
                 window.__fundStudents = <?= json_encode(array_map(function($a) use ($isRecurring, $fund) {
                     $aPaid = $isRecurring && isset($a['period_paid']) ? $a['period_paid'] : $a['total_paid'];
@@ -677,7 +856,7 @@ include dirname(__DIR__) . '/includes/topbar.php';
                 <div class="px-5 py-4 border-b border-mono-200 dark:border-mono-800">
                     <h3 class="text-sm font-semibold"><i class="fas fa-plus-circle mr-1 text-mono-400"></i> Record Payment</h3>
                 </div>
-                <form method="POST" class="p-5 space-y-4">
+                <form method="POST" class="p-5 space-y-4" enctype="multipart/form-data" x-data="{ paymentMethod: 'cash' }">
                     <?= csrfField() ?>
                     <input type="hidden" name="action" value="record_payment">
                     <input type="hidden" name="is_deposit" :value="isDeposit ? '1' : ''">
@@ -808,12 +987,21 @@ include dirname(__DIR__) . '/includes/topbar.php';
                     </div>
                     <div>
                         <label class="block text-xs font-medium text-mono-500 dark:text-mono-400 mb-1.5">Method</label>
-                        <select name="payment_method" class="w-full px-3 py-2.5 text-sm rounded-lg border border-mono-200 dark:border-mono-700 bg-mono-50 dark:bg-mono-800 focus:outline-none focus:ring-2 focus:ring-mono-900 dark:focus:ring-mono-100">
+                        <select name="payment_method" x-model="paymentMethod" class="w-full px-3 py-2.5 text-sm rounded-lg border border-mono-200 dark:border-mono-700 bg-mono-50 dark:bg-mono-800 focus:outline-none focus:ring-2 focus:ring-mono-900 dark:focus:ring-mono-100">
                             <option value="cash">Cash</option>
                             <option value="gcash">GCash</option>
                             <option value="bank_transfer">Bank Transfer</option>
                             <option value="other">Other</option>
                         </select>
+                    </div>
+                    <!-- Receipt Upload for GCash/Bank Transfer -->
+                    <div x-show="paymentMethod === 'gcash' || paymentMethod === 'bank_transfer'" x-transition x-cloak>
+                        <label class="block text-xs font-medium text-mono-500 dark:text-mono-400 mb-1.5">
+                            <i class="fas fa-receipt mr-1"></i> Upload Receipt <span class="text-mono-400 font-normal">(optional)</span>
+                        </label>
+                        <input type="file" name="receipt_image" accept="image/*"
+                               class="w-full px-3 py-2 text-sm rounded-lg border border-mono-200 dark:border-mono-700 bg-mono-50 dark:bg-mono-800 focus:outline-none focus:ring-2 focus:ring-mono-900 dark:focus:ring-mono-100 file:mr-3 file:py-1 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-medium file:bg-mono-200 dark:file:bg-mono-700 file:text-mono-700 dark:file:text-mono-300 hover:file:bg-mono-300 dark:hover:file:bg-mono-600">
+                        <p class="text-[10px] text-mono-400 mt-1">Max 5MB. JPEG, PNG, GIF, or WebP</p>
                     </div>
                     <div>
                         <label class="block text-xs font-medium text-mono-500 dark:text-mono-400 mb-1.5" x-text="isDeposit ? 'Source / Notes' : 'Notes'">Notes</label>
@@ -850,7 +1038,7 @@ include dirname(__DIR__) . '/includes/topbar.php';
                         <?php if ($isRecurring): ?><th class="text-left px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-mono-400 hidden md:table-cell">Period</th><?php endif; ?>
                         <th class="text-left px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-mono-400 hidden sm:table-cell">Method</th>
                         <th class="text-right px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-mono-400">Amount</th>
-                        <th class="text-right px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-mono-400 w-10"></th>
+                        <th class="text-right px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-mono-400 w-16"></th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-mono-100 dark:divide-mono-800">
@@ -872,13 +1060,20 @@ include dirname(__DIR__) . '/includes/topbar.php';
                         <?php if ($isRecurring): ?><td class="px-5 py-3 text-mono-400 hidden md:table-cell"><?= sanitize($payment['period_label'] ?? '&mdash;') ?></td><?php endif; ?>
                         <td class="px-5 py-3 text-mono-400 hidden sm:table-cell capitalize"><?= str_replace('_', ' ', $payment['payment_method']) ?></td>
                         <td class="px-5 py-3 text-right font-semibold"><?= formatMoney($payment['amount_paid']) ?></td>
-                        <td class="px-5 py-3 text-right">
-                            <form method="POST" class="inline opacity-0 group-hover:opacity-100 transition-opacity" onsubmit="return confirm('Remove this payment?')">
-                                <?= csrfField() ?>
-                                <input type="hidden" name="action" value="delete_payment">
-                                <input type="hidden" name="payment_id" value="<?= $payment['id'] ?>">
-                                <button type="submit" class="p-1 text-mono-400 hover:text-red-500"><i class="fas fa-times text-xs"></i></button>
-                            </form>
+                        <td class="px-5 py-3 text-right whitespace-nowrap">
+                            <div class="inline-flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <?php if (!empty($payment['receipt_image'])): ?>
+                                <button type="button" onclick="viewReceipt(<?= $payment['id'] ?>)" class="p-1 text-mono-400 hover:text-blue-500" title="View Receipt">
+                                    <i class="fas fa-file-image text-xs"></i>
+                                </button>
+                                <?php endif; ?>
+                                <form method="POST" class="inline" onsubmit="return confirm('Remove this payment?')">
+                                    <?= csrfField() ?>
+                                    <input type="hidden" name="action" value="delete_payment">
+                                    <input type="hidden" name="payment_id" value="<?= $payment['id'] ?>">
+                                    <button type="submit" class="p-1 text-mono-400 hover:text-red-500" <?= $isLocked ? 'disabled' : '' ?>><i class="fas fa-times text-xs"></i></button>
+                                </form>
+                            </div>
                         </td>
                     </tr>
                     <?php endforeach; ?>
@@ -887,6 +1082,266 @@ include dirname(__DIR__) . '/includes/topbar.php';
         </div>
     </div>
     <?php endif; ?>
+    <!-- END PAYMENTS TAB -->
+
+    <?php elseif ($activeTab === 'withdrawals'): ?>
+    <!-- WITHDRAWALS TAB -->
+    <div class="grid lg:grid-cols-3 gap-6">
+        <!-- Record Withdrawal Form -->
+        <?php if ($fund['status'] === 'active' && !$isLocked): ?>
+        <div class="bg-white dark:bg-mono-900 rounded-xl border border-mono-200 dark:border-mono-800">
+            <div class="px-5 py-4 border-b border-mono-200 dark:border-mono-800">
+                <h3 class="text-sm font-semibold"><i class="fas fa-money-bill-wave mr-1 text-red-400"></i> Record Withdrawal</h3>
+            </div>
+            <form method="POST" class="p-5 space-y-4">
+                <?= csrfField() ?>
+                <input type="hidden" name="action" value="record_withdrawal">
+                
+                <div>
+                    <label class="block text-xs font-medium text-mono-500 dark:text-mono-400 mb-1.5">Amount</label>
+                    <div class="relative">
+                        <span class="absolute left-3 top-1/2 -translate-y-1/2 text-mono-400 text-xs">&#8369;</span>
+                        <input type="number" name="withdrawal_amount" required step="0.01" min="0.01" placeholder="Enter amount..."
+                               class="w-full pl-7 pr-3 py-2.5 text-sm rounded-lg border border-mono-200 dark:border-mono-700 bg-mono-50 dark:bg-mono-800 focus:outline-none focus:ring-2 focus:ring-mono-900 dark:focus:ring-mono-100">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-mono-500 dark:text-mono-400 mb-1.5">Purpose <span class="text-red-400">*</span></label>
+                    <input type="text" name="purpose" required placeholder="e.g. Art supplies, Event expenses..."
+                           class="w-full px-3 py-2.5 text-sm rounded-lg border border-mono-200 dark:border-mono-700 bg-mono-50 dark:bg-mono-800 focus:outline-none focus:ring-2 focus:ring-mono-900 dark:focus:ring-mono-100">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-mono-500 dark:text-mono-400 mb-1.5">Date</label>
+                    <input type="date" name="withdrawal_date" value="<?= date('Y-m-d') ?>"
+                           class="w-full px-3 py-2.5 text-sm rounded-lg border border-mono-200 dark:border-mono-700 bg-mono-50 dark:bg-mono-800 focus:outline-none focus:ring-2 focus:ring-mono-900 dark:focus:ring-mono-100">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-mono-500 dark:text-mono-400 mb-1.5">Notes</label>
+                    <input type="text" name="withdrawal_notes" placeholder="Additional notes (optional)..."
+                           class="w-full px-3 py-2.5 text-sm rounded-lg border border-mono-200 dark:border-mono-700 bg-mono-50 dark:bg-mono-800 focus:outline-none focus:ring-2 focus:ring-mono-900 dark:focus:ring-mono-100">
+                </div>
+                <button type="submit" class="w-full py-2.5 rounded-lg bg-red-500 hover:bg-red-600 text-white text-sm font-semibold transition-colors">
+                    <i class="fas fa-arrow-down mr-1"></i> Record Withdrawal
+                </button>
+            </form>
+        </div>
+        <?php endif; ?>
+        
+        <!-- Withdrawal History -->
+        <div class="<?= ($fund['status'] === 'active' && !$isLocked) ? 'lg:col-span-2' : 'lg:col-span-3' ?> bg-white dark:bg-mono-900 rounded-xl border border-mono-200 dark:border-mono-800">
+            <div class="px-5 py-4 border-b border-mono-200 dark:border-mono-800 flex items-center justify-between">
+                <h3 class="text-sm font-semibold">
+                    <i class="fas fa-history mr-1.5 text-mono-400"></i> Withdrawal History
+                    <span class="text-mono-400 font-normal ml-1">(<?= count($withdrawals) ?>)</span>
+                </h3>
+                <div class="flex items-center gap-2 text-xs">
+                    <span class="text-mono-400">Balance:</span>
+                    <span class="font-bold <?= $currentBalance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400' ?>"><?= formatMoney($currentBalance) ?></span>
+                </div>
+            </div>
+            <?php if (empty($withdrawals)): ?>
+            <div class="px-5 py-12 text-center">
+                <i class="fas fa-coins text-3xl text-mono-200 dark:text-mono-700 mb-3"></i>
+                <p class="text-sm text-mono-400 mb-1">No withdrawals recorded yet</p>
+                <p class="text-xs text-mono-400">Record expenses or withdrawals from this fund</p>
+            </div>
+            <?php else: ?>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="border-b border-mono-100 dark:border-mono-800">
+                            <th class="text-left px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-mono-400">Date</th>
+                            <th class="text-left px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-mono-400">Purpose</th>
+                            <th class="text-right px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-mono-400">Amount</th>
+                            <th class="text-right px-5 py-3 text-[11px] font-semibold uppercase tracking-wider text-mono-400 w-10"></th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-mono-100 dark:divide-mono-800">
+                        <?php foreach ($withdrawals as $w): ?>
+                        <tr class="hover:bg-mono-50 dark:hover:bg-mono-800/50 transition-colors group">
+                            <td class="px-5 py-3 text-mono-500"><?= formatDate($w['withdrawal_date']) ?></td>
+                            <td class="px-5 py-3">
+                                <span class="font-medium"><?= sanitize($w['purpose']) ?></span>
+                                <?php if ($w['notes']): ?>
+                                <span class="text-[10px] text-mono-400 ml-1">&mdash; <?= sanitize($w['notes']) ?></span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="px-5 py-3 text-right font-semibold text-red-500">-<?= formatMoney($w['amount']) ?></td>
+                            <td class="px-5 py-3 text-right">
+                                <?php if (!$isLocked): ?>
+                                <form method="POST" class="inline opacity-0 group-hover:opacity-100 transition-opacity" onsubmit="return confirm('Remove this withdrawal?')">
+                                    <?= csrfField() ?>
+                                    <input type="hidden" name="action" value="delete_withdrawal">
+                                    <input type="hidden" name="withdrawal_id" value="<?= $w['id'] ?>">
+                                    <button type="submit" class="p-1 text-mono-400 hover:text-red-500"><i class="fas fa-times text-xs"></i></button>
+                                </form>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                    <tfoot>
+                        <tr class="border-t border-mono-200 dark:border-mono-700 bg-mono-50 dark:bg-mono-800/50">
+                            <td colspan="2" class="px-5 py-3 text-xs font-semibold text-mono-500">Total Withdrawn</td>
+                            <td class="px-5 py-3 text-right font-bold text-red-500"><?= formatMoney($totalWithdrawals) ?></td>
+                            <td></td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
+    <!-- END WITHDRAWALS TAB -->
+
+    <?php elseif ($activeTab === 'settings'): ?>
+    <!-- SETTINGS TAB -->
+    <div class="max-w-2xl space-y-6">
+        <!-- Lock Settings -->
+        <div class="bg-white dark:bg-mono-900 rounded-xl border border-mono-200 dark:border-mono-800 p-5">
+            <h3 class="text-sm font-semibold mb-4"><i class="fas fa-lock mr-1.5 text-mono-400"></i> Record Locking</h3>
+            
+            <div class="space-y-4">
+                <!-- Current Lock Status -->
+                <div class="flex items-center justify-between p-4 rounded-lg bg-mono-50 dark:bg-mono-800">
+                    <div>
+                        <p class="text-sm font-medium">Lock Status</p>
+                        <p class="text-xs text-mono-400 mt-0.5">
+                            <?php if ($isLocked): ?>
+                                Locked <?php if ($fund['locked_at']): ?>on <?= formatDate($fund['locked_at'], 'M d, Y g:i A') ?><?php endif; ?>
+                                <?php 
+                                if ($lockedBy) {
+                                    $lockerStmt = $pdo->prepare("SELECT full_name FROM accounts WHERE id = ?");
+                                    $lockerStmt->execute([$lockedBy]);
+                                    $lockerName = $lockerStmt->fetchColumn();
+                                    if ($lockerName) echo ' by ' . sanitize($lockerName);
+                                }
+                                ?>
+                            <?php else: ?>
+                                Records are editable
+                            <?php endif; ?>
+                        </p>
+                    </div>
+                    <?php if ($isLocked): ?>
+                        <?php $canUnlock = isAdmin() || $lockedBy == $_SESSION['user_id']; ?>
+                        <?php if ($canUnlock): ?>
+                        <form method="POST">
+                            <?= csrfField() ?>
+                            <input type="hidden" name="action" value="unlock">
+                            <button type="submit" class="px-4 py-2 text-xs font-medium border border-mono-200 dark:border-mono-700 rounded-lg hover:bg-mono-100 dark:hover:bg-mono-700 transition-colors">
+                                <i class="fas fa-unlock mr-1"></i> Unlock
+                            </button>
+                        </form>
+                        <?php else: ?>
+                        <span class="text-[10px] text-mono-400 italic">Only the locker can unlock</span>
+                        <?php endif; ?>
+                    <?php else: ?>
+                    <form method="POST">
+                        <?= csrfField() ?>
+                        <input type="hidden" name="action" value="lock">
+                        <button type="submit" onclick="return confirm('Lock this fund? This will prevent any edits until unlocked.')" class="px-4 py-2 text-xs font-medium bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors">
+                            <i class="fas fa-lock mr-1"></i> Lock Now
+                        </button>
+                    </form>
+                    <?php endif; ?>
+                </div>
+
+                <!-- Auto-Lock Setting -->
+                <div class="p-4 rounded-lg border border-mono-200 dark:border-mono-700">
+                    <div class="flex items-start justify-between gap-4">
+                        <div>
+                            <p class="text-sm font-medium">Auto-Lock Records</p>
+                            <p class="text-xs text-mono-400 mt-0.5">Automatically prevent editing of payment records older than a set number of days</p>
+                        </div>
+                    </div>
+                    <form method="POST" class="mt-4 flex items-center gap-3">
+                        <?= csrfField() ?>
+                        <input type="hidden" name="action" value="set_auto_lock">
+                        <select name="auto_lock_days" class="px-3 py-2 text-sm rounded-lg border border-mono-200 dark:border-mono-700 bg-mono-50 dark:bg-mono-800 focus:outline-none focus:ring-2 focus:ring-mono-900 dark:focus:ring-mono-100">
+                            <option value="0" <?= $autoLockDays == 0 ? 'selected' : '' ?>>Disabled</option>
+                            <option value="1" <?= $autoLockDays == 1 ? 'selected' : '' ?>>1 day</option>
+                            <option value="3" <?= $autoLockDays == 3 ? 'selected' : '' ?>>3 days</option>
+                            <option value="7" <?= $autoLockDays == 7 ? 'selected' : '' ?>>7 days</option>
+                            <option value="14" <?= $autoLockDays == 14 ? 'selected' : '' ?>>14 days</option>
+                            <option value="30" <?= $autoLockDays == 30 ? 'selected' : '' ?>>30 days</option>
+                        </select>
+                        <button type="submit" class="px-4 py-2 text-xs font-medium bg-mono-900 dark:bg-mono-100 text-white dark:text-mono-900 rounded-lg hover:bg-mono-800 dark:hover:bg-mono-200 transition-colors">
+                            Save
+                        </button>
+                    </form>
+                    <?php if ($autoLockDays > 0): ?>
+                    <p class="mt-3 text-[11px] text-amber-600 dark:text-amber-400">
+                        <i class="fas fa-info-circle mr-1"></i> Payments older than <?= $autoLockDays ?> day<?= $autoLockDays > 1 ? 's' : '' ?> cannot be deleted
+                    </p>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+
+        <!-- Fund Info -->
+        <div class="bg-white dark:bg-mono-900 rounded-xl border border-mono-200 dark:border-mono-800 p-5">
+            <h3 class="text-sm font-semibold mb-4"><i class="fas fa-info-circle mr-1.5 text-mono-400"></i> Fund Information</h3>
+            <dl class="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                    <dt class="text-xs text-mono-400">Fund Type</dt>
+                    <dd class="font-medium capitalize"><?= $fundType ?></dd>
+                </div>
+                <div>
+                    <dt class="text-xs text-mono-400">Frequency</dt>
+                    <dd class="font-medium capitalize"><?= $fund['frequency'] ?></dd>
+                </div>
+                <div>
+                    <dt class="text-xs text-mono-400">Amount</dt>
+                    <dd class="font-medium"><?= formatMoney($fund['amount']) ?></dd>
+                </div>
+                <div>
+                    <dt class="text-xs text-mono-400">Status</dt>
+                    <dd class="font-medium capitalize"><?= $fund['status'] ?></dd>
+                </div>
+                <div>
+                    <dt class="text-xs text-mono-400">Total Collected</dt>
+                    <dd class="font-medium text-emerald-600 dark:text-emerald-400"><?= formatMoney($grandCollected) ?></dd>
+                </div>
+                <div>
+                    <dt class="text-xs text-mono-400">Total Withdrawn</dt>
+                    <dd class="font-medium text-red-500"><?= formatMoney($totalWithdrawals) ?></dd>
+                </div>
+            </dl>
+        </div>
+    </div>
+    <!-- END SETTINGS TAB -->
+    <?php endif; ?>
 </div>
+
+<!-- Receipt View Modal -->
+<div id="receiptModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 backdrop-blur-sm p-4" onclick="if(event.target === this) closeReceiptModal()">
+    <div class="bg-white dark:bg-mono-900 rounded-xl max-w-lg w-full max-h-[90vh] overflow-hidden shadow-2xl">
+        <div class="px-5 py-4 border-b border-mono-200 dark:border-mono-800 flex items-center justify-between">
+            <h3 class="text-sm font-semibold"><i class="fas fa-receipt mr-1.5 text-mono-400"></i> Payment Receipt</h3>
+            <button onclick="closeReceiptModal()" class="p-1 text-mono-400 hover:text-mono-600 dark:hover:text-mono-300 transition-colors">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="p-5 overflow-auto max-h-[calc(90vh-80px)]">
+            <img id="receiptImage" src="" alt="Receipt" class="w-full rounded-lg border border-mono-200 dark:border-mono-700">
+        </div>
+    </div>
+</div>
+
+<script>
+function viewReceipt(paymentId) {
+    const modal = document.getElementById('receiptModal');
+    const img = document.getElementById('receiptImage');
+    img.src = '<?= BASE_URL ?>/funds/receipt.php?id=' + paymentId;
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+}
+
+function closeReceiptModal() {
+    const modal = document.getElementById('receiptModal');
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+}
+</script>
 
 <?php include dirname(__DIR__) . '/includes/footer.php'; ?>

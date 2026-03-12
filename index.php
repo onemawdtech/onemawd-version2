@@ -18,7 +18,9 @@ $funds = $pdo->query("
                 THEN (SELECT COUNT(*) FROM subject_enrollments se JOIN students st ON se.student_id = st.id WHERE se.subject_id = f.subject_id AND st.status = 'active')
                 ELSE (SELECT COUNT(*) FROM fund_assignees WHERE fund_id = f.id)
            END as assignee_count,
-           COALESCE((SELECT SUM(fp.amount_paid) FROM fund_payments fp WHERE fp.fund_id = f.id), 0) as collected
+           COALESCE((SELECT SUM(fp.amount_paid) FROM fund_payments fp WHERE fp.fund_id = f.id), 0) as collected,
+           COALESCE((SELECT SUM(fw.amount) FROM fund_withdrawals fw WHERE fw.fund_id = f.id), 0) as withdrawn,
+           (SELECT COUNT(*) FROM fund_billing_periods fbp WHERE fbp.fund_id = f.id) as period_count
     FROM funds f
     WHERE f.status = 'active'
     ORDER BY f.created_at DESC
@@ -26,13 +28,19 @@ $funds = $pdo->query("
 
 $grandTarget = 0;
 $grandCollected = 0;
+$grandWithdrawn = 0;
 foreach ($funds as $f) {
     $fType = $f['fund_type'] ?? 'standard';
     if ($fType === 'standard') {
-        $grandTarget += $f['amount'] * $f['assignee_count'];
+        // If fund has billing periods, multiply base amount by period count
+        // Otherwise just use base amount
+        $periodMultiplier = $f['period_count'] > 0 ? $f['period_count'] : 1;
+        $grandTarget += $f['amount'] * $periodMultiplier * $f['assignee_count'];
     }
     $grandCollected += $f['collected'];
+    $grandWithdrawn += $f['withdrawn'];
 }
+$grandBalance = $grandCollected - $grandWithdrawn;
 $grandPercent = $grandTarget > 0 ? round(($grandCollected / $grandTarget) * 100) : 0;
 
 // Obfuscate name for public display: "Justin" → "J*****", "Dela" → "D***", "Cruz" → "C***"
@@ -57,9 +65,19 @@ $recentPayments = $pdo->query("
     ORDER BY fp.created_at DESC
     LIMIT 5
 ")->fetchAll();
+
+// Recent withdrawals (last 5)
+$recentWithdrawals = $pdo->query("
+    SELECT fw.amount, fw.withdrawal_date, fw.purpose, fw.notes,
+           f.fund_name
+    FROM fund_withdrawals fw
+    JOIN funds f ON fw.fund_id = f.id
+    ORDER BY fw.created_at DESC
+    LIMIT 5
+")->fetchAll();
 ?>
 <!DOCTYPE html>
-<html lang="en" x-data="{ darkMode: localStorage.getItem('darkMode') === 'true' }" 
+<html lang="en" x-data="{ darkMode: localStorage.getItem('darkMode') === 'true', donateModal: false }" 
       :class="{ 'dark': darkMode }" 
       x-init="$watch('darkMode', val => localStorage.setItem('darkMode', val))">
 <head>
@@ -129,6 +147,10 @@ $recentPayments = $pdo->query("
             <a href="#developer" class="hidden sm:inline-flex items-center px-3 py-1.5 text-xs font-medium text-mono-500 hover:text-mono-900 dark:hover:text-mono-100 rounded-lg hover:bg-mono-100 dark:hover:bg-mono-800 transition-all">
                 Developer
             </a>
+            <button @click="donateModal = true" class="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-pink-500 hover:text-pink-600 dark:hover:text-pink-400 rounded-lg hover:bg-pink-50 dark:hover:bg-pink-900/20 transition-all">
+                <i class="fas fa-heart text-[10px]"></i>
+                Donate
+            </button>
             <button @click="darkMode = !darkMode" 
                     class="w-9 h-9 rounded-xl flex items-center justify-center text-mono-400 hover:bg-mono-100 dark:hover:bg-mono-800 transition-all hover:scale-105">
                 <i class="fas fa-moon text-sm" x-show="!darkMode"></i>
@@ -234,50 +256,32 @@ $recentPayments = $pdo->query("
                 <!-- Left -->
                 <div class="flex-1">
                     <div class="flex items-center gap-3 mb-3">
-                        <div class="w-10 h-10 rounded-xl bg-mono-100 dark:bg-mono-800 flex items-center justify-center">
-                            <i class="fas fa-vault text-mono-400"></i>
+                        <div class="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
+                            <i class="fas fa-wallet text-emerald-500"></i>
                         </div>
-                        <p class="text-xs font-semibold text-mono-400 uppercase tracking-wider">Total Collected</p>
+                        <p class="text-xs font-semibold text-mono-400 uppercase tracking-wider">Current Balance</p>
                     </div>
-                    <h3 class="text-4xl sm:text-5xl font-black tracking-tight mb-1"><?= formatMoney($grandCollected) ?></h3>
-                    <p class="text-sm text-mono-400">of <?= formatMoney($grandTarget) ?> total target</p>
+                    <h3 class="text-4xl sm:text-5xl font-black tracking-tight mb-1 <?= $grandBalance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400' ?>"><?= formatMoney($grandBalance) ?></h3>
+                    <p class="text-sm text-mono-400"><?= formatMoney($grandCollected) ?> collected &minus; <?= formatMoney($grandWithdrawn) ?> withdrawn</p>
                 </div>
 
-                <!-- Right: donut + mini stats -->
-                <div class="flex items-center gap-8">
-                    <div class="relative w-28 h-28 flex-shrink-0">
-                        <svg viewBox="0 0 36 36" class="w-28 h-28 -rotate-90">
-                            <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                                  fill="none" stroke-width="2.5" class="stroke-mono-100 dark:stroke-mono-800" />
-                            <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                                  fill="none" stroke-width="2.5" stroke-linecap="round"
-                                  class="<?= $grandPercent >= 100 ? 'stroke-emerald-500' : 'stroke-mono-900 dark:stroke-mono-100' ?>"
-                                  stroke-dasharray="<?= $grandPercent ?>, 100" />
-                        </svg>
-                        <div class="absolute inset-0 flex flex-col items-center justify-center">
-                            <span class="text-2xl font-bold"><?= $grandPercent ?>%</span>
-                            <span class="text-[9px] text-mono-400 -mt-0.5">collected</span>
-                        </div>
+                <!-- Right: Stats Grid -->
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div class="text-center p-3 rounded-xl bg-mono-50 dark:bg-mono-800">
+                        <p class="text-lg font-bold"><?= formatMoney($grandCollected) ?></p>
+                        <p class="text-[10px] text-mono-400 uppercase tracking-wider">Collected</p>
                     </div>
-                    <div class="hidden sm:flex flex-col gap-3">
-                        <div class="flex items-center gap-3">
-                            <div class="w-8 h-8 rounded-lg bg-emerald-50 dark:bg-emerald-500/10 flex items-center justify-center">
-                                <i class="fas fa-arrow-down text-emerald-500 text-xs"></i>
-                            </div>
-                            <div>
-                                <p class="text-xs font-bold"><?= formatMoney($grandCollected) ?></p>
-                                <p class="text-[10px] text-mono-400">Received</p>
-                            </div>
-                        </div>
-                        <div class="flex items-center gap-3">
-                            <div class="w-8 h-8 rounded-lg bg-amber-50 dark:bg-amber-500/10 flex items-center justify-center">
-                                <i class="fas fa-clock text-amber-500 text-xs"></i>
-                            </div>
-                            <div>
-                                <p class="text-xs font-bold"><?= formatMoney(max($grandTarget - $grandCollected, 0)) ?></p>
-                                <p class="text-[10px] text-mono-400">Remaining</p>
-                            </div>
-                        </div>
+                    <div class="text-center p-3 rounded-xl bg-red-50 dark:bg-red-900/20">
+                        <p class="text-lg font-bold text-red-500"><?= formatMoney($grandWithdrawn) ?></p>
+                        <p class="text-[10px] text-mono-400 uppercase tracking-wider">Withdrawn</p>
+                    </div>
+                    <div class="text-center p-3 rounded-xl bg-mono-50 dark:bg-mono-800">
+                        <p class="text-lg font-bold"><?= formatMoney($grandTarget) ?></p>
+                        <p class="text-[10px] text-mono-400 uppercase tracking-wider">Target</p>
+                    </div>
+                    <div class="text-center p-3 rounded-xl bg-mono-50 dark:bg-mono-800">
+                        <p class="text-lg font-bold"><?= $grandPercent ?>%</p>
+                        <p class="text-[10px] text-mono-400 uppercase tracking-wider">Progress</p>
                     </div>
                 </div>
             </div>
@@ -285,7 +289,7 @@ $recentPayments = $pdo->query("
             <!-- Progress bar -->
             <div class="mt-6 pt-6 border-t border-mono-100 dark:border-mono-800">
                 <div class="flex items-center justify-between text-xs text-mono-400 mb-2">
-                    <span>Overall Progress</span>
+                    <span>Collection Progress</span>
                     <span class="font-semibold text-mono-600 dark:text-mono-300"><?= formatMoney($grandCollected) ?> / <?= formatMoney($grandTarget) ?></span>
                 </div>
                 <div class="w-full bg-mono-100 dark:bg-mono-800 rounded-full h-3 overflow-hidden">
@@ -310,8 +314,13 @@ $recentPayments = $pdo->query("
                 $fType = $fund['fund_type'] ?? 'standard';
                 $fIsGeneral = $fType === 'general';
                 $fIsVoluntary = $fType === 'voluntary';
-                $target = ($fIsGeneral || $fIsVoluntary) ? 0 : $fund['amount'] * $fund['assignee_count'];
+                // Calculate target: base amount × period count × assignees
+                $periodMultiplier = $fund['period_count'] > 0 ? $fund['period_count'] : 1;
+                $perPersonAmount = $fund['amount'] * $periodMultiplier;
+                $target = ($fIsGeneral || $fIsVoluntary) ? 0 : $perPersonAmount * $fund['assignee_count'];
                 $collected = $fund['collected'];
+                $withdrawn = $fund['withdrawn'];
+                $balance = $collected - $withdrawn;
                 $pct = $target > 0 ? round(($collected / $target) * 100) : 0;
                 $remaining = max($target - $collected, 0);
                 $paidCount = $pdo->prepare("SELECT COUNT(DISTINCT student_id) FROM fund_payments WHERE fund_id = ?");
@@ -340,7 +349,7 @@ $recentPayments = $pdo->query("
                             <?php elseif ($fIsVoluntary): ?>
                             <span class="text-[10px] text-mono-400">Voluntary contributions</span>
                             <?php else: ?>
-                            <span class="text-[10px] text-mono-400"><?= formatMoney($fund['amount']) ?>/person</span>
+                            <span class="text-[10px] text-mono-400"><?= formatMoney($perPersonAmount) ?>/person<?= $fund['period_count'] > 1 ? ' (' . $fund['period_count'] . ' periods)' : '' ?></span>
                             <?php endif; ?>
                             <?php if ($fund['frequency'] !== 'one-time'): ?>
                             <span class="px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider rounded-full bg-mono-100 dark:bg-mono-800 text-mono-500"><?= $fund['frequency'] ?></span>
@@ -349,14 +358,18 @@ $recentPayments = $pdo->query("
                     </div>
                 </div>
 
-                <!-- Amount -->
+                <!-- Amount & Balance -->
                 <div class="mb-4">
-                    <span class="text-xl font-bold"><?= formatMoney($collected) ?></span>
-                    <?php if (!$fIsGeneral && !$fIsVoluntary): ?>
-                    <span class="text-xs text-mono-400">/ <?= formatMoney($target) ?></span>
-                    <?php else: ?>
-                    <span class="text-xs text-mono-400">collected</span>
-                    <?php endif; ?>
+                    <div class="flex items-baseline gap-2">
+                        <span class="text-xl font-bold <?= $balance >= 0 ? '' : 'text-red-500' ?>"><?= formatMoney($balance) ?></span>
+                        <span class="text-xs text-mono-400">balance</span>
+                    </div>
+                    <div class="flex items-center gap-3 mt-1 text-[10px]">
+                        <span class="text-emerald-600 dark:text-emerald-400"><i class="fas fa-arrow-down mr-0.5"></i><?= formatMoney($collected) ?> in</span>
+                        <?php if ($withdrawn > 0): ?>
+                        <span class="text-red-500"><i class="fas fa-arrow-up mr-0.5"></i><?= formatMoney($withdrawn) ?> out</span>
+                        <?php endif; ?>
+                    </div>
                 </div>
 
                 <?php if ($fIsGeneral || $fIsVoluntary): ?>
@@ -415,44 +428,95 @@ $recentPayments = $pdo->query("
         <?php endif; ?>
 
         <!-- ═══ RECENT PAYMENTS ═══ -->
-        <?php if (!empty($recentPayments)): ?>
-        <div class="bg-white dark:bg-mono-900 rounded-2xl border border-mono-200 dark:border-mono-800 overflow-hidden">
-            <div class="px-6 py-4 border-b border-mono-100 dark:border-mono-800 flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                    <i class="fas fa-stream text-mono-400 text-xs"></i>
-                    <h3 class="text-sm font-semibold">Recent Payments</h3>
+        <!-- Recent Activity Grid -->
+        <div class="grid lg:grid-cols-2 gap-4">
+            <!-- Recent Payments -->
+            <?php if (!empty($recentPayments)): ?>
+            <div class="bg-white dark:bg-mono-900 rounded-2xl border border-mono-200 dark:border-mono-800 overflow-hidden">
+                <div class="px-6 py-4 border-b border-mono-100 dark:border-mono-800 flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <i class="fas fa-arrow-down text-emerald-500 text-xs"></i>
+                        <h3 class="text-sm font-semibold">Recent Payments</h3>
+                    </div>
+                    <span class="text-[10px] text-mono-400 font-medium uppercase tracking-wider">Money In</span>
                 </div>
-                <span class="text-[10px] text-mono-400 font-medium uppercase tracking-wider">Latest Activity</span>
-            </div>
-            <div class="divide-y divide-mono-100 dark:divide-mono-800">
-                <?php foreach ($recentPayments as $pay): ?>
-                <div class="px-6 py-3.5 flex items-center justify-between hover:bg-mono-50 dark:hover:bg-mono-800/50 transition-colors">
-                    <div class="flex items-center gap-3 min-w-0">
-                        <div class="w-8 h-8 rounded-full <?= $pay['fp_student_id'] ? 'bg-mono-100 dark:bg-mono-800' : 'bg-amber-100 dark:bg-amber-900/20' ?> flex items-center justify-center flex-shrink-0">
-                            <?php if ($pay['fp_student_id']): ?>
-                            <span class="text-[10px] font-bold text-mono-400">**</span>
-                            <?php else: ?>
-                            <i class="fas fa-piggy-bank text-[10px] text-amber-500"></i>
-                            <?php endif; ?>
+                <div class="divide-y divide-mono-100 dark:divide-mono-800">
+                    <?php foreach ($recentPayments as $pay): ?>
+                    <div class="px-6 py-3.5 flex items-center justify-between hover:bg-mono-50 dark:hover:bg-mono-800/50 transition-colors">
+                        <div class="flex items-center gap-3 min-w-0">
+                            <div class="w-8 h-8 rounded-full <?= $pay['fp_student_id'] ? 'bg-mono-100 dark:bg-mono-800' : 'bg-amber-100 dark:bg-amber-900/20' ?> flex items-center justify-center flex-shrink-0">
+                                <?php if ($pay['fp_student_id']): ?>
+                                <span class="text-[10px] font-bold text-mono-400">**</span>
+                                <?php else: ?>
+                                <i class="fas fa-piggy-bank text-[10px] text-amber-500"></i>
+                                <?php endif; ?>
+                            </div>
+                            <div class="min-w-0">
+                                <?php if ($pay['fp_student_id']): ?>
+                                <p class="text-xs font-medium truncate"><?= sanitize(obfuscateName(ucwords($pay['first_name']) . ' ' . ucwords($pay['last_name']))) ?></p>
+                                <?php else: ?>
+                                <p class="text-xs font-medium truncate text-amber-600 dark:text-amber-400">Deposit<?= $pay['notes'] ? ' — ' . sanitize($pay['notes']) : '' ?></p>
+                                <?php endif; ?>
+                                <p class="text-[10px] text-mono-400 truncate"><?= sanitize($pay['fund_name']) ?></p>
+                            </div>
                         </div>
-                        <div class="min-w-0">
-                            <?php if ($pay['fp_student_id']): ?>
-                            <p class="text-xs font-medium truncate"><?= sanitize(obfuscateName(ucwords($pay['first_name']) . ' ' . ucwords($pay['last_name']))) ?></p>
-                            <?php else: ?>
-                            <p class="text-xs font-medium truncate text-amber-600 dark:text-amber-400">Deposit<?= $pay['notes'] ? ' — ' . sanitize($pay['notes']) : '' ?></p>
-                            <?php endif; ?>
-                            <p class="text-[10px] text-mono-400 truncate"><?= sanitize($pay['fund_name']) ?></p>
+                        <div class="text-right flex-shrink-0 ml-3">
+                            <p class="text-xs font-bold text-emerald-600 dark:text-emerald-400">+<?= formatMoney($pay['amount_paid']) ?></p>
+                            <p class="text-[10px] text-mono-400"><?= formatDate($pay['payment_date'], 'M d') ?></p>
                         </div>
                     </div>
-                    <div class="text-right flex-shrink-0 ml-3">
-                        <p class="text-xs font-bold text-emerald-600 dark:text-emerald-400">+<?= formatMoney($pay['amount_paid']) ?></p>
-                        <p class="text-[10px] text-mono-400"><?= formatDate($pay['payment_date'], 'M d') ?></p>
-                    </div>
+                    <?php endforeach; ?>
                 </div>
-                <?php endforeach; ?>
             </div>
+            <?php endif; ?>
+
+            <!-- Recent Withdrawals -->
+            <?php if (!empty($recentWithdrawals)): ?>
+            <div class="bg-white dark:bg-mono-900 rounded-2xl border border-mono-200 dark:border-mono-800 overflow-hidden">
+                <div class="px-6 py-4 border-b border-mono-100 dark:border-mono-800 flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <i class="fas fa-arrow-up text-red-500 text-xs"></i>
+                        <h3 class="text-sm font-semibold">Recent Withdrawals</h3>
+                    </div>
+                    <span class="text-[10px] text-mono-400 font-medium uppercase tracking-wider">Money Out</span>
+                </div>
+                <div class="divide-y divide-mono-100 dark:divide-mono-800">
+                    <?php foreach ($recentWithdrawals as $w): ?>
+                    <div class="px-6 py-3.5 flex items-center justify-between hover:bg-mono-50 dark:hover:bg-mono-800/50 transition-colors">
+                        <div class="flex items-center gap-3 min-w-0">
+                            <div class="w-8 h-8 rounded-full bg-red-100 dark:bg-red-900/20 flex items-center justify-center flex-shrink-0">
+                                <i class="fas fa-receipt text-[10px] text-red-500"></i>
+                            </div>
+                            <div class="min-w-0">
+                                <p class="text-xs font-medium truncate"><?= sanitize($w['purpose']) ?></p>
+                                <p class="text-[10px] text-mono-400 truncate"><?= sanitize($w['fund_name']) ?><?= $w['notes'] ? ' — ' . sanitize($w['notes']) : '' ?></p>
+                            </div>
+                        </div>
+                        <div class="text-right flex-shrink-0 ml-3">
+                            <p class="text-xs font-bold text-red-500">-<?= formatMoney($w['amount']) ?></p>
+                            <p class="text-[10px] text-mono-400"><?= formatDate($w['withdrawal_date'], 'M d') ?></p>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+            <?php elseif (!empty($recentPayments)): ?>
+            <!-- Empty withdrawals placeholder when payments exist -->
+            <div class="bg-white dark:bg-mono-900 rounded-2xl border border-mono-200 dark:border-mono-800 overflow-hidden">
+                <div class="px-6 py-4 border-b border-mono-100 dark:border-mono-800 flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <i class="fas fa-arrow-up text-red-500 text-xs"></i>
+                        <h3 class="text-sm font-semibold">Recent Withdrawals</h3>
+                    </div>
+                    <span class="text-[10px] text-mono-400 font-medium uppercase tracking-wider">Money Out</span>
+                </div>
+                <div class="px-6 py-12 text-center">
+                    <i class="fas fa-coins text-2xl text-mono-200 dark:text-mono-700 mb-2"></i>
+                    <p class="text-xs text-mono-400">No withdrawals recorded yet</p>
+                </div>
+            </div>
+            <?php endif; ?>
         </div>
-        <?php endif; ?>
 
         <!-- Timestamp -->
         <div class="mt-8 text-center">
@@ -559,12 +623,133 @@ $recentPayments = $pdo->query("
                                 <p class="text-[10px] text-mono-400">University</p>
                             </div>
                         </div>
+
+                        <!-- Donate button -->
+                        <div class="mt-6 pt-5 border-t border-mono-100 dark:border-mono-800">
+                            <button @click="donateModal = true" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 text-white text-sm font-semibold hover:from-pink-600 hover:to-rose-600 transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-pink-500/25">
+                                <i class="fas fa-heart text-xs"></i>
+                                Support the Developer
+                            </button>
+                            <p class="text-[11px] text-mono-400 mt-2">Your support helps keep this project alive!</p>
+                        </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- Contributors -->
+            <div class="bg-white dark:bg-mono-900 rounded-2xl border border-mono-200 dark:border-mono-800 p-5 mt-4">
+                <div class="flex items-center gap-2 mb-4">
+                    <i class="fas fa-users text-mono-400 text-xs"></i>
+                    <h4 class="text-xs font-semibold uppercase tracking-wider text-mono-500">Contributors</h4>
+                </div>
+                <div class="flex flex-wrap gap-3">
+                    <!-- Contributor 1 -->
+                    <div class="flex items-center gap-2.5 px-3 py-2 bg-mono-50 dark:bg-mono-800/50 rounded-xl">
+                        <div class="w-8 h-8 rounded-full bg-mono-200 dark:bg-mono-700 flex items-center justify-center flex-shrink-0">
+                            <span class="text-[10px] font-semibold text-mono-500">CO</span>
+                        </div>
+                        <div>
+                            <p class="text-xs font-medium">Chris Orante</p>
+                        </div>
+                    </div>
+                    <!-- Add more contributors here -->
                 </div>
             </div>
         </div>
     </div>
 </section>
+
+<!-- ═══════════════════════════════════════════════════════════
+     DONATE MODAL
+     ═══════════════════════════════════════════════════════════ -->
+<div x-show="donateModal" x-cloak
+     class="fixed inset-0 z-[100] flex items-center justify-center p-4"
+     x-transition:enter="transition ease-out duration-200"
+     x-transition:enter-start="opacity-0"
+     x-transition:enter-end="opacity-100"
+     x-transition:leave="transition ease-in duration-150"
+     x-transition:leave-start="opacity-100"
+     x-transition:leave-end="opacity-0">
+    <!-- Backdrop -->
+    <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" @click="donateModal = false"></div>
+    
+    <!-- Modal -->
+    <div class="relative bg-white dark:bg-mono-900 rounded-2xl border border-mono-200 dark:border-mono-800 shadow-2xl w-full max-w-sm overflow-hidden"
+         x-transition:enter="transition ease-out duration-200"
+         x-transition:enter-start="opacity-0 scale-95"
+         x-transition:enter-end="opacity-100 scale-100"
+         x-transition:leave="transition ease-in duration-150"
+         x-transition:leave-start="opacity-100 scale-100"
+         x-transition:leave-end="opacity-0 scale-95"
+         @click.away="donateModal = false">
+        
+        <!-- Header -->
+        <div class="flex items-center justify-between px-5 py-4 border-b border-mono-100 dark:border-mono-800">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-xl bg-mono-900 dark:bg-mono-100 flex items-center justify-center">
+                    <i class="fas fa-heart text-white dark:text-mono-900 text-sm"></i>
+                </div>
+                <div>
+                    <h3 class="text-sm font-semibold">Support OneMAWD</h3>
+                    <p class="text-[10px] text-mono-400">Help keep this project alive</p>
+                </div>
+            </div>
+            <button @click="donateModal = false" class="w-8 h-8 rounded-lg hover:bg-mono-100 dark:hover:bg-mono-800 flex items-center justify-center transition-colors text-mono-400 hover:text-mono-600">
+                <i class="fas fa-times text-sm"></i>
+            </button>
+        </div>
+        
+        <!-- Body -->
+        <div class="p-5" x-data="{ activeTab: 'gcash' }">
+            <!-- Tabs -->
+            <div class="flex gap-1 p-1 bg-mono-100 dark:bg-mono-800 rounded-xl mb-5">
+                <button @click="activeTab = 'gcash'" 
+                        :class="activeTab === 'gcash' ? 'bg-white dark:bg-mono-900 shadow-sm text-mono-900 dark:text-mono-100' : 'text-mono-500 hover:text-mono-700 dark:hover:text-mono-300'"
+                        class="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all">
+                    <span class="w-5 h-5 rounded bg-blue-500 flex items-center justify-center text-white text-[10px] font-bold">G</span>
+                    GCash/Maya
+                </button>
+                <button @click="activeTab = 'bank'" 
+                        :class="activeTab === 'bank' ? 'bg-white dark:bg-mono-900 shadow-sm text-mono-900 dark:text-mono-100' : 'text-mono-500 hover:text-mono-700 dark:hover:text-mono-300'"
+                        class="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all">
+                    <i class="fas fa-building-columns text-emerald-500"></i>
+                    Bank
+                </button>
+            </div>
+            
+            <!-- GCash/Maya Tab -->
+            <div x-show="activeTab === 'gcash'" x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100">
+                <div class="bg-mono-50 dark:bg-mono-800/50 rounded-xl p-4 text-center">
+                    <div class="bg-white dark:bg-mono-900 rounded-xl p-3 inline-block mb-3 border border-mono-200 dark:border-mono-700">
+                        <img src="<?= BASE_URL ?>/assets/img/qr-gcash.png" alt="GCash/Maya QR" class="w-36 h-36 rounded-lg" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect fill=%22%23f5f5f5%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2250%22 font-size=%228%22 text-anchor=%22middle%22 dy=%22.3em%22 fill=%22%23999%22>QR Code</text></svg>'">
+                    </div>
+                    <p class="text-xs font-medium text-mono-600 dark:text-mono-300 mb-1">Scan with GCash or Maya</p>
+                    <p class="text-[10px] text-mono-400">Jan Andrei</p>
+                </div>
+            </div>
+            
+            <!-- Bank Tab -->
+            <div x-show="activeTab === 'bank'" x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100">
+                <div class="bg-mono-50 dark:bg-mono-800/50 rounded-xl p-4 text-center">
+                    <div class="bg-white dark:bg-mono-900 rounded-xl p-3 inline-block mb-3 border border-mono-200 dark:border-mono-700">
+                        <img src="<?= BASE_URL ?>/assets/img/qr-bank.png" alt="Bank QR" class="w-36 h-36 rounded-lg" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect fill=%22%23f5f5f5%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2250%22 font-size=%228%22 text-anchor=%22middle%22 dy=%22.3em%22 fill=%22%23999%22>QR Code</text></svg>'">
+                    </div>
+                    <p class="text-xs font-medium text-mono-600 dark:text-mono-300 mb-1">Scan with banking app</p>
+                    <p class="text-[10px] text-mono-400">Jan Andrei • BDO/BPI/UnionBank</p>
+                    <p class="text-[10px] text-emerald-500 mt-1"><i class="fas fa-globe mr-1"></i>Accepts international transfers</p>
+                </div>
+            </div>
+            
+            <!-- Footer -->
+            <div class="mt-5 pt-4 border-t border-mono-100 dark:border-mono-800 text-center">
+                <p class="text-[11px] text-mono-400 leading-relaxed">
+                    <i class="fas fa-heart text-pink-500 mr-1"></i>
+                    Every donation helps with development & server costs
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
 
 <!-- ═══════════════════════════════════════════════════════════
      FOOTER
