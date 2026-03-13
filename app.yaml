@@ -1,6 +1,7 @@
 kind: wasmer.io/App.v0
 owner: janandreiiii
-name: onemawd-version2
+name: onemawd
+app_id: da_nVEIoteUEV48
 package: .
 debug: true
 

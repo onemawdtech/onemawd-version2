@@ -3,8 +3,15 @@
  * eClass - Receipt Image Server
  * Serves receipt images stored in the database
  */
+ob_start();
 require_once dirname(__DIR__) . '/config/app.php';
-requireLogin();
+ob_end_clean(); // Clear any output from app.php
+
+// Check if user is logged in
+if (empty($_SESSION['user_id'])) {
+    http_response_code(403);
+    exit('Unauthorized');
+}
 
 $paymentId = (int)($_GET['id'] ?? 0);
 

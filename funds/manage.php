@@ -25,6 +25,8 @@ if (!$fund) {
 // Section access check for officers/teachers
 $officerSection = getUserSection();
 $sectionScoped = hasSectionScope();
+$fundType = $fund['fund_type'] ?? 'standard';
+$isGeneral = $fundType === 'general';
 if ($sectionScoped) {
     $hasAccess = false;
     // General funds: allow access if user created the fund
@@ -53,8 +55,6 @@ if ($sectionScoped) {
 
 $pageSubtitle = $fund['fund_name'];
 $isRecurring = $fund['frequency'] !== 'one-time';
-$fundType = $fund['fund_type'] ?? 'standard';
-$isGeneral = $fundType === 'general';
 $isVoluntary = $fundType === 'voluntary';
 $isLocked = (bool)($fund['is_locked'] ?? 0);
 $lockedBy = $fund['locked_by'] ?? null;
@@ -303,7 +303,9 @@ if (!$isGeneral) {
 }
 
 // Payment history
-$paymentQuery = "SELECT fp.*, st.first_name, st.last_name, st.student_id as sid, fbp.period_label
+$paymentQuery = "SELECT fp.id, fp.fund_id, fp.student_id, fp.amount_paid, fp.payment_date, fp.payment_method, fp.notes, fp.recorded_by, fp.billing_period_id, fp.created_at,
+    (fp.receipt_image IS NOT NULL) as has_receipt,
+    st.first_name, st.last_name, st.student_id as sid, fbp.period_label
     FROM fund_payments fp
     LEFT JOIN students st ON fp.student_id = st.id
     LEFT JOIN fund_billing_periods fbp ON fp.billing_period_id = fbp.id
@@ -1062,7 +1064,7 @@ include dirname(__DIR__) . '/includes/topbar.php';
                         <td class="px-5 py-3 text-right font-semibold"><?= formatMoney($payment['amount_paid']) ?></td>
                         <td class="px-5 py-3 text-right whitespace-nowrap">
                             <div class="inline-flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <?php if (!empty($payment['receipt_image'])): ?>
+                                <?php if (!empty($payment['has_receipt'])): ?>
                                 <button type="button" onclick="viewReceipt(<?= $payment['id'] ?>)" class="p-1 text-mono-400 hover:text-blue-500" title="View Receipt">
                                     <i class="fas fa-file-image text-xs"></i>
                                 </button>
